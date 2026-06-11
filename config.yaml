@@ -1,0 +1,56 @@
+sam3:
+  checkpoint_path: Sam3Docker/model/sam3.pt
+  score_threshold: 0.4
+  dedup_iou_threshold: 0.55
+  suppress_contained_masks: true
+  containment_threshold: 0.85
+  bbox_containment_threshold: 0.85
+  containment_min_area_ratio: 1.2
+  prompts: basket, control, grey screwdriver, yellow screwdriver, saw, knife, pliers, graver
+
+flowpose:
+  paths:
+    py_runner_path: FlowPoseDocker/FlowPose/py_runners
+    pretrained_flow_model_path: FlowPoseDocker/model/flowpose.pth
+    pretrained_scale_model_path: FlowPoseDocker/model/scalenet.pth
+    dino_repo_path: FlowPoseDocker/model/facebookresearch_dinov2_main
+  visualization:
+    fx: 606.9654541015625
+    fy: 606.133056640625
+    cx: 323.8822937011719
+    cy: 257.6228332519531
+    axis_len: 0.035
+    width: 640
+    height: 480
+
+siglip:
+  model:
+    checkpoint: SiglipDocker/model/task_tool/lastvit_clip_output_v4_t1_fp16/model_lastvit_clip_fp16.pt
+    graph_info_file: SiglipDocker/model/task_tool/lastvit_clip_output_v4_t1_fp16/classification_viz/graph_info_epochfp16.json
+  inference:
+    topk: 5
+    image_size: 224
+    pad_head_ratio: 0.25
+  runtime:
+    topic: /siglip/result
+    frame_id: camera_rgb_link
+    capture_timeout: 2.0
+    log_every: 10
+
+marvin:
+  object_yaml_path: MarvinDocker/robotaction/data/tool/tool.yaml
+  status_json_path: MarvinDocker/robotaction/data/tool/graph_info.json
+  status_topic: /siglip/result
+  progress_topic: /control/task_percentage
+  object_tf_topic: ""
+  base_frame: base_link
+  tf_keepalive_hz: 10.0
+
+realsense:
+  width: 640
+  height: 480
+  fps: 30
+
+fresh_tf:
+  min_interval_sec: 1.0
+  settle_sec: 0.15
