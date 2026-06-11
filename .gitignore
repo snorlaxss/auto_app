@@ -1,0 +1,21 @@
+.vscode
+/checkpoints
+__pycache__
+*.pyc
+.github
+/ckpts
+
+## flowpose
+FlowPoseDocker/model
+
+##sam3
+Sam3Docker/model
+
+##siglip
+SiglipDocker/model/task_tool
+
+##translator_1
+translator_1/data
+
+##yolo
+YOLODocker/model

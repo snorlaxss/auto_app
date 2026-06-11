@@ -1,0 +1,11 @@
+{
+  "package_name": "fake_interface_pkg",
+  "non_idl_tuples": [
+    "/home/snorlax/work/gradio_sam_genpose/translator_1/src/fake_interface_pkg:msg/ObjectPose.msg",
+    "/home/snorlax/work/gradio_sam_genpose/translator_1/src/fake_interface_pkg:msg/Action.msg",
+    "/home/snorlax/work/gradio_sam_genpose/translator_1/src/fake_interface_pkg:msg/Pose.msg",
+    "/home/snorlax/work/gradio_sam_genpose/translator_1/src/fake_interface_pkg:msg/ActionPlan.msg",
+    "/home/snorlax/work/gradio_sam_genpose/translator_1/src/fake_interface_pkg:msg/KeypointPose.msg",
+    "/home/snorlax/work/gradio_sam_genpose/translator_1/src/fake_interface_pkg:msg/KeypointPoseArray.msg"
+  ]
+}

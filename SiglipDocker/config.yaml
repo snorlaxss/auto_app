@@ -1,0 +1,11 @@
+docker:
+  image: siglip2
+  container_name: SiglipDocker
+server:
+  host: 0.0.0.0
+  port: 7777
+  mode: single
+model:
+  path: /workspace/model/siglip2-so400m-patch14-224
+  checkpoint: /workspace/model/task_tool/lastvit_clip_output_v4_t1_fp16/model_lastvit_clip_fp16.pt
+  graph_info_file: /workspace/model/task_tool/lastvit_clip_output_v4_t1_fp16/classification_viz/graph_info_epochfp16.json

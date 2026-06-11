@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "fake_interface_pkg__py",
+		"source" : "/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/fake_interface_pkg__py"
+	}
+}

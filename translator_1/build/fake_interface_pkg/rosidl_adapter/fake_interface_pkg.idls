@@ -1,0 +1,6 @@
+/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/rosidl_adapter/fake_interface_pkg:msg/ObjectPose.idl
+/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/rosidl_adapter/fake_interface_pkg:msg/Action.idl
+/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/rosidl_adapter/fake_interface_pkg:msg/Pose.idl
+/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/rosidl_adapter/fake_interface_pkg:msg/ActionPlan.idl
+/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/rosidl_adapter/fake_interface_pkg:msg/KeypointPose.idl
+/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/rosidl_adapter/fake_interface_pkg:msg/KeypointPoseArray.idl

@@ -1,0 +1,48 @@
+{
+  "nodes": [
+    {
+      "node_id": "001",
+      "state_description": "tools all in table or exist tool in table",
+      "next_action":  [
+        { 
+          "targets": ["saw", "knife", "yellow_screw", "grey_screw", "pliers", "graver", "control"],
+          "action_name": "pick",
+          "arm": "correct",
+          "speed": 1.0,
+          "correction_mode": "reverse"
+        }
+      ],
+      "parents": null,
+      "center_feature": null
+    },
+    {
+      "node_id": "002",
+      "state_description": "tool in hand",
+      "next_action":  [
+        { 
+          "target": "basket",
+          "action_name": "place",
+          "arm": "copy last one",
+          "speed": 1.0,
+          "correction_mode": "forward"
+        },
+        { 
+          "target": "home",
+          "action_name": "location1",
+          "arm": "copy last one",
+          "speed": 1.0,
+          "correction_mode": "forward"
+        }
+      ],
+      "parents": null,
+      "center_feature": null
+    },
+    {
+      "node_id": "003",
+      "state_description": "all tools in basket and table is empty",
+      "next_action": "home",
+      "parents": null,
+      "center_feature": null
+    }
+  ]
+}

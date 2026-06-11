@@ -1,0 +1,522 @@
+{
+  "class_list": [
+    {
+      "name": "cube_red",
+      "label": 1,
+      "instance_ids": [
+        "real-cube_red_004",
+        "real-cube_red_006"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 66,
+        "real-test": 33
+      }
+    },
+    {
+      "name": "essential_oil",
+      "label": 2,
+      "instance_ids": [
+        "real-essential_oil_003"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 38,
+        "real-test": 19
+      }
+    },
+    {
+      "name": "fanta",
+      "label": 3,
+      "instance_ids": [
+        "real-fanta_001",
+        "real-fanta_002"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 120,
+        "real-test": 60
+      }
+    },
+    {
+      "name": "gum",
+      "label": 4,
+      "instance_ids": [
+        "real-gum_004"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 38,
+        "real-test": 19
+      }
+    },
+    {
+      "name": "hammer",
+      "label": 5,
+      "instance_ids": [
+        "real-hammer_003"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 54,
+        "real-test": 27
+      }
+    },
+    {
+      "name": "mug",
+      "label": 6,
+      "instance_ids": [
+        "real-mug_003",
+        "real-mug_005"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 66,
+        "real-test": 33
+      }
+    },
+    {
+      "name": "pliers",
+      "label": 7,
+      "instance_ids": [
+        "real-pliers_004"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 54,
+        "real-test": 27
+      }
+    },
+    {
+      "name": "s_mug",
+      "label": 8,
+      "instance_ids": [
+        "real-s_mug_001"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 54,
+        "real-test": 27
+      }
+    },
+    {
+      "name": "weitai",
+      "label": 9,
+      "instance_ids": [
+        "real-weitai_002"
+      ],
+      "stat": {
+        "phocal-train": 0,
+        "phocal-test": 0,
+        "omniobject3d-train": 0,
+        "omniobject3d-test": 0,
+        "google_scan-train": 0,
+        "google_scan-test": 0,
+        "real-train": 66,
+        "real-test": 33
+      }
+    }
+  ],
+  "instance_dict": {
+    "real-fanta_001": {
+      "object_id": "real-fanta_001",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "fanta/fanta_001/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 3,
+      "class_name": "fanta",
+      "dimensions": [
+        0.08911854600906377,
+        0.15396792010180532,
+        0.08245994107159653
+      ]
+    },
+    "real-weitai_002": {
+      "object_id": "real-weitai_002",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "weitai/weitai_002/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 9,
+      "class_name": "weitai",
+      "dimensions": [
+        0.12709279779128807,
+        0.1144589813676871,
+        0.11123279893853305
+      ]
+    },
+    "real-essential_oil_003": {
+      "object_id": "real-essential_oil_003",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "essential_oil/essential_oil_003/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 2,
+      "class_name": "essential_oil",
+      "dimensions": [
+        0.12608523760649776,
+        0.20355120144846714,
+        0.18801295701763154
+      ]
+    },
+    "real-gum_004": {
+      "object_id": "real-gum_004",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "gum/gum_004/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 4,
+      "class_name": "gum",
+      "dimensions": [
+        0.09937545104546594,
+        0.10148936830982494,
+        0.07448977452485495
+      ]
+    },
+    "real-mug_005": {
+      "object_id": "real-mug_005",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "mug/mug_005/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 6,
+      "class_name": "mug",
+      "dimensions": [
+        0.0957057189311743,
+        0.07779259575048615,
+        0.10579978204848511
+      ]
+    },
+    "real-cube_red_006": {
+      "object_id": "real-cube_red_006",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "cube_red/cube_red_006/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 1,
+      "class_name": "cube_red",
+      "dimensions": [
+        0.08372865583452076,
+        0.062165735505442264,
+        0.07684956464924261
+      ]
+    },
+    "real-mug_003": {
+      "object_id": "real-mug_003",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "mug/mug_003/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 6,
+      "class_name": "mug",
+      "dimensions": [
+        0.12048272467237454,
+        0.08031976837772307,
+        0.11138859311007329
+      ]
+    },
+    "real-cube_red_004": {
+      "object_id": "real-cube_red_004",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "cube_red/cube_red_004/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 1,
+      "class_name": "cube_red",
+      "dimensions": [
+        0.07951643215448059,
+        0.06815563854767809,
+        0.08077031649985766
+      ]
+    },
+    "real-s_mug_001": {
+      "object_id": "real-s_mug_001",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "s_mug/s_mug_001/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 8,
+      "class_name": "s_mug",
+      "dimensions": [
+        0.08319332773361912,
+        0.06742991429548206,
+        0.09474091284944716
+      ]
+    },
+    "real-fanta_002": {
+      "object_id": "real-fanta_002",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "fanta/fanta_002/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 3,
+      "class_name": "fanta",
+      "dimensions": [
+        0.11455292969314838,
+        0.13947985957590872,
+        0.093299055881612
+      ]
+    },
+    "real-hammer_003": {
+      "object_id": "real-hammer_003",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "hammer/hammer_003/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 5,
+      "class_name": "hammer",
+      "dimensions": [
+        0.2904063627071773,
+        0.03169100279054786,
+        0.13842323132168255
+      ]
+    },
+    "real-pliers_004": {
+      "object_id": "real-pliers_004",
+      "source": "owndata",
+      "name": "Aligned",
+      "obj_path": "pliers/pliers_004/Scan/Aligned.obj",
+      "tag": {
+        "datatype": "real",
+        "sceneChanger": false,
+        "symmetry": {
+          "any": false,
+          "x": "none",
+          "y": "none",
+          "z": "none"
+        },
+        "materialOptions": [
+          "raw",
+          "diffuse"
+        ],
+        "upAxis": [
+          "y"
+        ]
+      },
+      "class_label": 7,
+      "class_name": "pliers",
+      "dimensions": [
+        0.07882836726082515,
+        0.04732193548937752,
+        0.177848025271661
+      ]
+    }
+  }
+}

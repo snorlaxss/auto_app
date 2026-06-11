@@ -1,0 +1,233 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-ae98c0f3cdd9f37549b4.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17
+					]
+				},
+				{
+					"build" : "fake_interface_pkg__py",
+					"jsonFile" : "directory-fake_interface_pkg__py-7cb0d8f856a21687c3a9.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg/fake_interface_pkg__py",
+					"targetIndexes" : 
+					[
+						4
+					]
+				}
+			],
+			"name" : "",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0,
+						1
+					],
+					"name" : "fake_interface_pkg",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "ament_cmake_python_build_fake_interface_pkg_egg::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ament_cmake_python_build_fake_interface_pkg_egg-59ced66b5a111b38b1d7.json",
+					"name" : "ament_cmake_python_build_fake_interface_pkg_egg",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ament_cmake_python_copy_fake_interface_pkg::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ament_cmake_python_copy_fake_interface_pkg-7ebde3582c7a095851b4.json",
+					"name" : "ament_cmake_python_copy_fake_interface_pkg",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg-e5ae35561634263f6673.json",
+					"name" : "fake_interface_pkg",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__cpp-6059f92354f58334158f.json",
+					"name" : "fake_interface_pkg__cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "fake_interface_pkg__py::@b2d6cd35366957c22b3f",
+					"jsonFile" : "target-fake_interface_pkg__py-2fd610cff2f5b0e272de.json",
+					"name" : "fake_interface_pkg__py",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_generator_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_generator_c-1075aab1f3d699b3faa7.json",
+					"name" : "fake_interface_pkg__rosidl_generator_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_generator_py::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_generator_py-ffd05fea9969bd22825e.json",
+					"name" : "fake_interface_pkg__rosidl_generator_py",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_c-630e9e9f16a91e8805cd.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_c__pyext::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_c__pyext-925e4d81e1c0b807c0db.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_c__pyext",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_cpp-edee66e01c191bb290a1.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_fastrtps_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_fastrtps_c-bc08a63226d92200bbdc.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_fastrtps_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_fastrtps_c__pyext::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_fastrtps_c__pyext-e9a115131871bf05f68d.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_fastrtps_c__pyext",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_fastrtps_cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_fastrtps_cpp-561a4a0b1873fff370ef.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_fastrtps_cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_introspection_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_introspection_c-677ffd8140d01668ce2f.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_introspection_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_introspection_c__pyext::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_introspection_c__pyext-2d5951b6ba289aa9bc1f.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_introspection_c__pyext",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg__rosidl_typesupport_introspection_cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg__rosidl_typesupport_introspection_cpp-9016e4159550ee023982.json",
+					"name" : "fake_interface_pkg__rosidl_typesupport_introspection_cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fake_interface_pkg_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fake_interface_pkg_uninstall-411ab2dc2b1debe21832.json",
+					"name" : "fake_interface_pkg_uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-83e31465e9d16e4664dc.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/snorlax/work/gradio_sam_genpose/translator_1/build/fake_interface_pkg",
+		"source" : "/home/snorlax/work/gradio_sam_genpose/translator_1/src/fake_interface_pkg"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

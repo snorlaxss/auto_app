@@ -1,0 +1,33 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action__type_support.c.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action__type_support.c.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action_plan__type_support.c.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action_plan__type_support.c.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose__type_support.c.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose__type_support.c.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose_array__type_support.c.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose_array__type_support.c.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/object_pose__type_support.c.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/object_pose__type_support.c.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/pose__type_support.c.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/pose__type_support.c.o.d"
+  "libfake_interface_pkg__rosidl_typesupport_introspection_c.pdb"
+  "libfake_interface_pkg__rosidl_typesupport_introspection_c.so"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action__rosidl_typesupport_introspection_c.h"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action__type_support.c"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action_plan__rosidl_typesupport_introspection_c.h"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/action_plan__type_support.c"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose__rosidl_typesupport_introspection_c.h"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose__type_support.c"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose_array__rosidl_typesupport_introspection_c.h"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/keypoint_pose_array__type_support.c"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/object_pose__rosidl_typesupport_introspection_c.h"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/object_pose__type_support.c"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/pose__rosidl_typesupport_introspection_c.h"
+  "rosidl_typesupport_introspection_c/fake_interface_pkg/msg/detail/pose__type_support.c"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang C)
+  include(CMakeFiles/fake_interface_pkg__rosidl_typesupport_introspection_c.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

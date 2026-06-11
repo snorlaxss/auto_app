@@ -1,0 +1,7 @@
+ultralytics
+opencv-python-headless
+numpy
+Pillow
+PyYAML
+pyzmq
+lap>=0.5.12

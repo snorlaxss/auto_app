@@ -1,0 +1,33 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action__type_support_c.cpp.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action__type_support_c.cpp.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action_plan__type_support_c.cpp.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action_plan__type_support_c.cpp.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose__type_support_c.cpp.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose__type_support_c.cpp.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose_array__type_support_c.cpp.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose_array__type_support_c.cpp.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/object_pose__type_support_c.cpp.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/object_pose__type_support_c.cpp.o.d"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/pose__type_support_c.cpp.o"
+  "CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/pose__type_support_c.cpp.o.d"
+  "libfake_interface_pkg__rosidl_typesupport_fastrtps_c.pdb"
+  "libfake_interface_pkg__rosidl_typesupport_fastrtps_c.so"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action__rosidl_typesupport_fastrtps_c.h"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action__type_support_c.cpp"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action_plan__rosidl_typesupport_fastrtps_c.h"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/action_plan__type_support_c.cpp"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose__rosidl_typesupport_fastrtps_c.h"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose__type_support_c.cpp"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose_array__rosidl_typesupport_fastrtps_c.h"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/keypoint_pose_array__type_support_c.cpp"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/object_pose__rosidl_typesupport_fastrtps_c.h"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/object_pose__type_support_c.cpp"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/pose__rosidl_typesupport_fastrtps_c.h"
+  "rosidl_typesupport_fastrtps_c/fake_interface_pkg/msg/detail/pose__type_support_c.cpp"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/fake_interface_pkg__rosidl_typesupport_fastrtps_c.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()
