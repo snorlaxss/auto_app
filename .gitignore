@@ -12,10 +12,16 @@ FlowPoseDocker/model
 Sam3Docker/model
 
 ##siglip
-SiglipDocker/model/task_tool
+SiglipDocker/model
 
 ##translator_1
 translator_1/data
 
 ##yolo
 YOLODocker/model
+
+ros2data
+
+h5
+
+old

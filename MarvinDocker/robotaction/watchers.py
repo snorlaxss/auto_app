@@ -110,7 +110,7 @@ class TaskProgressWatcher:
             self._seen_zero = False
             self._reset_time = time.time()
 
-    def is_finished(self, silence_after_zero=1, finish_percentage=0.97):
+    def is_finished(self, silence_after_zero=1, finish_percentage=0.99):
         now = time.time()
         with self._lock:
             seen_active = self._seen_active

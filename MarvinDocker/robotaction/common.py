@@ -228,13 +228,32 @@ class ArmResolver:
     def __init__(self, get_last_arm: Callable):
         self._get_last_arm = get_last_arm
 
-    def resolve(self, arm_spec: Optional[str], translation=None) -> str:
+    def resolve(self, arm_spec: Optional[str], translation=None, rotation=None) -> str:
         if arm_spec == "copy last one":
             return self._get_last_arm() or "right"
         if arm_spec == "correct":
-            if translation is not None and translation.y > 0:
+            if translation is None:
+                return self._get_last_arm() or "right"
+            if translation.y > 0.1:
                 return "left"
-            return "right"
+            if translation.y < -0.1:
+                return "right"
+            
+            rot = quaternion_xyzw_to_matrix(
+                float(rotation.x),
+                float(rotation.y),
+                float(rotation.z),
+                float(rotation.w),
+            )
+            object_x_axis = rot[:, 0]
+            signed_angle = float(np.arctan2(object_x_axis[1], object_x_axis[0]))
+            angle_epsilon = np.deg2rad(1.0)
+            if -0.1 < translation.y < 0.1:
+                if signed_angle < -angle_epsilon:
+                    return "left"
+                if signed_angle > angle_epsilon:
+                    return "right"
+            return self._get_last_arm() or "right"
         return arm_spec or "right"
 
 

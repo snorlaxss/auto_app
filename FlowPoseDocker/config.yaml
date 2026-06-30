@@ -13,6 +13,6 @@ visualization:
   fy: 606.133056640625
   cx: 323.8822937011719
   cy: 257.6228332519531
-  axis_len: 0.08
+  axis_len: 0.035
   width: 640
   height: 480

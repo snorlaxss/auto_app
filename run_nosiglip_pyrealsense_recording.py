@@ -18,19 +18,33 @@ import json
 import ctypes
 import contextlib  # 补齐
 import copy
+import signal
+import shutil
+import subprocess
+from datetime import datetime
 from types import SimpleNamespace
-try:
-    from torchvision.transforms import functional as TVF, InterpolationMode
-    SIGLIP_TORCHVISION_IMPORT_ERROR = None
-except Exception as e:
-    TVF = None
-    InterpolationMode = None
-    SIGLIP_TORCHVISION_IMPORT_ERROR = e
 AUTO_APP_DIR = os.path.dirname(os.path.abspath(__file__))
 AUTO_APP_CONFIG_PATH = os.getenv(
     "AUTO_APP_CONFIG",
     os.path.join(AUTO_APP_DIR, "config.yaml"),
 )
+
+
+def _ensure_localhost_no_proxy():
+    localhost_hosts = ["127.0.0.1", "localhost", "::1"]
+    for key in ("NO_PROXY", "no_proxy"):
+        existing = os.environ.get(key, "")
+        parts = [p.strip() for p in existing.split(",") if p.strip()]
+        changed = False
+        for host in localhost_hosts:
+            if host not in parts:
+                parts.append(host)
+                changed = True
+        if changed or not existing:
+            os.environ[key] = ",".join(parts)
+
+
+_ensure_localhost_no_proxy()
 MARVIN_DOCKER_DIR = os.path.join(AUTO_APP_DIR, "MarvinDocker")
 ROBOTACTION_DIR = os.path.join(MARVIN_DOCKER_DIR, "robotaction")
 ROBOTACTION_INSTALL_DIR = os.path.join(ROBOTACTION_DIR, "install")
@@ -59,16 +73,35 @@ if os.path.isdir(MARVIN_DOCKER_DIR) and MARVIN_DOCKER_DIR not in sys.path:
 # ROS2 imports
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from tf2_msgs.msg import TFMessage
-try:
-    import pyrealsense2 as rs
-except ImportError:
-    rs = None
+from sensor_msgs.msg import CameraInfo, Image as ROSImage
 from geometry_msgs.msg import TransformStamped, Pose
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster
 from rclpy.duration import Duration
 from scipy.spatial.transform import Rotation as R
 from std_msgs.msg import Int16MultiArray, String
+
+CAMERAS = {
+    "front": {
+        "rgb_topic": "/camera_head/camera_head/color/image_raw",
+        "depth_topic": "/camera_head/camera_head/aligned_depth_to_color/image_raw",
+        "info_topic": "/camera_head/camera_head/color/camera_info",
+        "obs_key": "point_cloud_front",
+    },
+    "left_wrist": {
+        "rgb_topic": "/camera_left_wrist/camera_left_wrist/color/image_rect_raw",
+        "depth_topic": "/camera_left_wrist/camera_left_wrist/aligned_depth_to_color/image_raw",
+        "info_topic": "/camera_left_wrist/camera_left_wrist/color/camera_info",
+        "obs_key": "point_cloud_left_wrist",
+    },
+    "right_wrist": {
+        "rgb_topic": "/camera_right_wrist/camera_right_wrist/color/image_rect_raw",
+        "depth_topic": "/camera_right_wrist/camera_right_wrist/aligned_depth_to_color/image_raw",
+        "info_topic": "/camera_right_wrist/camera_right_wrist/color/camera_info",
+        "obs_key": "point_cloud_right_wrist",
+    },
+}
 # Import custom ROS2 messages
 try:
     from fake_interface_pkg.msg import KeypointPose, KeypointPoseArray
@@ -81,9 +114,6 @@ SAM3_DOCKER_DIR = os.path.join(AUTO_APP_DIR, "Sam3Docker")
 SAM3_SOURCE_DIR = os.path.join(SAM3_DOCKER_DIR, "sam3-main")
 if os.path.isdir(SAM3_SOURCE_DIR) and SAM3_SOURCE_DIR not in sys.path:
     sys.path.insert(0, SAM3_SOURCE_DIR)
-
-SIGLIP_DOCKER_DIR = os.path.join(AUTO_APP_DIR, "SiglipDocker")
-SIGLIP_CONFIG_PATH = os.path.join(SIGLIP_DOCKER_DIR, "config.yaml")
 
 FLOWPOSE_DOCKER_DIR = os.path.join(AUTO_APP_DIR, "FlowPoseDocker")
 FLOWPOSE_SOURCE_DIR = os.path.join(FLOWPOSE_DOCKER_DIR, "FlowPose")
@@ -102,11 +132,35 @@ except Exception as e:
     SAM3_IMPORT_ERROR = e
 
 try:
+    from rclpy.callback_groups import ReentrantCallbackGroup
     from robotaction.robot_action import FusionNode as MarvinFusionNode
-    from robotaction.common import TaskStatus
+    from robotaction.common import (
+        ActionHandler,
+        ArmResolver,
+        FixedEndpointManager,
+        Step,
+        TaskStatus,
+        normalize_frame_id,
+        normalize_obj_name,
+        transform_to_matrix,
+    )
+    from robotaction.execution import FusionExecutionMixin
+    from robotaction.tf_helpers import FusionTfMixin
+    from robotaction.watchers import ObjectTfWatcher, TaskProgressWatcher
     ROBOTACTION_IMPORT_ERROR = None
 except Exception as e:
     MarvinFusionNode = None
+    ActionHandler = None
+    ArmResolver = None
+    FixedEndpointManager = None
+    Step = None
+    FusionExecutionMixin = object
+    FusionTfMixin = object
+    ObjectTfWatcher = None
+    TaskProgressWatcher = None
+    normalize_frame_id = lambda value: str(value or "").strip().lstrip("/")
+    normalize_obj_name = lambda value: str(value or "").strip().lower().replace("_", " ")
+    transform_to_matrix = None
     TaskStatus = SimpleNamespace(STOP="stop")
     ROBOTACTION_IMPORT_ERROR = e
 
@@ -200,6 +254,140 @@ def _resolve_path_from_roots(raw_path="", roots=()):
         if os.path.exists(mapped):
             return mapped
     return candidate
+
+
+class RosbagProcessManager:
+    def __init__(self, config):
+        bag_cfg = config.get("rosbag", {}) if isinstance(config, dict) else {}
+        configured_root = str(
+            bag_cfg.get(
+                "save_path",
+                os.path.join(AUTO_APP_DIR, "ros2bags"),
+            )
+        ).strip()
+        self.save_root = (
+            configured_root
+            if os.path.isabs(configured_root)
+            else os.path.join(AUTO_APP_DIR, configured_root)
+        )
+        self.stop_timeout = float(bag_cfg.get("stop_timeout_sec", 10.0))
+        self.lock = threading.RLock()
+        self.record_process = None
+        self.play_process = None
+        self.active_bag_path = None
+        self.latest_bag_path = None
+
+    @staticmethod
+    def _signal_process_group(process, sig):
+        if process is None or process.poll() is not None:
+            return
+        os.killpg(os.getpgid(process.pid), sig)
+
+    def _next_bag_path(self):
+        os.makedirs(self.save_root, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        return os.path.join(self.save_root, timestamp)
+
+    def start_recording(self):
+        with self.lock:
+            if self.record_process is not None and self.record_process.poll() is None:
+                return self.active_bag_path
+            if self.play_process is not None and self.play_process.poll() is None:
+                raise RuntimeError("rosbag正在回放中，请等待回放结束后再继续")
+            bag_path = self._next_bag_path()
+            try:
+                process = subprocess.Popen(
+                    ["ros2", "bag", "record", "-a", "-o", bag_path],
+                    start_new_session=True,
+                )
+            except Exception:
+                self.record_process = None
+                self.active_bag_path = None
+                raise
+            self.record_process = process
+            self.active_bag_path = bag_path
+            print(f"[Rosbag] recording started: pid={process.pid}, path={bag_path}")
+            return bag_path
+
+    def stop_recording(self):
+        with self.lock:
+            process = self.record_process
+            bag_path = self.active_bag_path
+            self.record_process = None
+            self.active_bag_path = None
+        if process is None:
+            return self.latest_bag_path
+        if process.poll() is None:
+            print(f"[Rosbag] sending SIGINT: pid={process.pid}")
+            with contextlib.suppress(ProcessLookupError):
+                self._signal_process_group(process, signal.SIGINT)
+            try:
+                process.wait(timeout=self.stop_timeout)
+            except subprocess.TimeoutExpired:
+                print(f"[Rosbag] SIGINT timeout; terminating pid={process.pid}")
+                with contextlib.suppress(ProcessLookupError):
+                    self._signal_process_group(process, signal.SIGTERM)
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        self._signal_process_group(process, signal.SIGKILL)
+                    process.wait(timeout=2.0)
+        if bag_path and os.path.isdir(bag_path):
+            with self.lock:
+                self.latest_bag_path = bag_path
+            print(f"[Rosbag] recording stopped: path={bag_path}")
+        return bag_path
+
+    def play_latest(self):
+        with self.lock:
+            bag_path = self.latest_bag_path
+            if not bag_path or not os.path.isdir(bag_path):
+                raise RuntimeError("没有可回放的rosbag记录")
+            if self.record_process is not None and self.record_process.poll() is None:
+                raise RuntimeError("当前仍在录制，请等待本轮任务完成")
+            if self.play_process is not None and self.play_process.poll() is None:
+                raise RuntimeError("rosbag正在回放中")
+            process = subprocess.Popen(
+                ["ros2", "bag", "play", bag_path],
+                start_new_session=True,
+            )
+            self.play_process = process
+            print(f"[Rosbag] playback started: pid={process.pid}, path={bag_path}")
+            return bag_path
+
+    def delete_latest(self):
+        with self.lock:
+            bag_path = self.latest_bag_path
+            if not bag_path or not os.path.isdir(bag_path):
+                raise RuntimeError("没有可删除的rosbag记录")
+            if self.record_process is not None and self.record_process.poll() is None:
+                raise RuntimeError("当前仍在录制，不能删除rosbag")
+            if self.play_process is not None and self.play_process.poll() is None:
+                raise RuntimeError("当前正在回放，不能删除rosbag")
+
+            save_root = os.path.realpath(self.save_root)
+            real_bag_path = os.path.realpath(bag_path)
+            if os.path.commonpath([save_root, real_bag_path]) != save_root:
+                raise RuntimeError(f"拒绝删除save_path之外的目录: {bag_path}")
+
+        shutil.rmtree(real_bag_path)
+        with self.lock:
+            if self.latest_bag_path == bag_path:
+                self.latest_bag_path = None
+        print(f"[Rosbag] deleted: path={real_bag_path}")
+        return real_bag_path
+
+    def shutdown(self):
+        self.stop_recording()
+        with self.lock:
+            process = self.play_process
+            self.play_process = None
+        if process is not None and process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                self._signal_process_group(process, signal.SIGINT)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=3.0)
 
 
 # Prevent argument parsing at import
@@ -353,7 +541,7 @@ class FlowPoseEstimator:
             frame_gap_threshold=10,
             eval_repeat_num=25,
             retain_ratio=0.4,
-            enable_tracking=True,
+            enable_tracking=False,
             seed=0,
             dropout=0,
             use_edm_aug=False,
@@ -369,7 +557,7 @@ class FlowPoseEstimator:
             ema_rate=0.999,
             repeat_num=20,
             clustering=1,
-            clustering_eps=0.05,
+            clustering_eps=0.01,
             clustering_minpts=0.1667,
         )
 
@@ -457,6 +645,18 @@ class FlowPoseEstimator:
             poses = np.asarray(pose_all, dtype=np.float32)
             lengths = np.asarray(length_all, dtype=np.float32)
             if flowpose_visualize_detections is not None and len(poses) > 0 and len(lengths) > 0:
+                raw_pose = getattr(self.inferencer, "last_raw_pose", None)
+                bbox_poses = None
+                if raw_pose is not None:
+                    try:
+                        if hasattr(raw_pose, "detach"):
+                            raw_pose = raw_pose.detach().cpu().numpy()
+                        bbox_poses = np.asarray(raw_pose, dtype=np.float32)
+                        if bbox_poses.shape[0] != poses.shape[0]:
+                            bbox_poses = None
+                    except Exception:
+                        bbox_poses = None
+
                 vis = flowpose_visualize_detections(
                     vis,
                     poses,
@@ -465,6 +665,7 @@ class FlowPoseEstimator:
                     color=None,
                     thickness=1,
                     axes_length=self.axis_len,
+                    bbox_poses=bbox_poses,
                 )
             if draw_labels:
                 for i, pose_mat in enumerate(poses):
@@ -727,19 +928,51 @@ class ROS2ImageSubscriber(Node):
         self.depth_image = None
         self.depth_scale = 0.001
         self.frame_received = threading.Event()
-
-        # RealSense is used directly for RGB-D capture. ROS2 is still used for TF
-        # and action publication.
         auto_cfg = _load_auto_app_config()
-        realsense_cfg = auto_cfg.get("realsense", {}) if isinstance(auto_cfg, dict) else {}
-        self.rs_width = int(os.getenv("REALSENSE_WIDTH", str(realsense_cfg.get("width", 640))))
-        self.rs_height = int(os.getenv("REALSENSE_HEIGHT", str(realsense_cfg.get("height", 480))))
-        self.rs_fps = int(os.getenv("REALSENSE_FPS", str(realsense_cfg.get("fps", 30))))
-        self.rs_serial = os.getenv("REALSENSE_SERIAL", "").strip()
-        self.rs_pipeline = None
-        self.rs_profile = None
-        self.rs_align = None
-        self.rs_lock = threading.Lock()
+        self.camera_lock = threading.RLock()
+        self.camera_condition = threading.Condition(self.camera_lock)
+        self.camera_frames = {
+            camera_name: {
+                "rgb": None,
+                "depth": None,
+                "info": None,
+                "rgb_stamp": 0.0,
+                "depth_stamp": 0.0,
+                "rgb_seq": 0,
+                "depth_seq": 0,
+                "depth_scale": 0.001,
+            }
+            for camera_name in CAMERAS
+        }
+        self.camera_subscriptions = []
+        self.front_camera_name = os.getenv("PERCEPTION_CAMERA", "front").strip() or "front"
+        if self.front_camera_name not in CAMERAS:
+            raise ValueError(
+                f"Unknown PERCEPTION_CAMERA='{self.front_camera_name}', "
+                f"available={sorted(CAMERAS)}"
+            )
+        self.rgbd_max_skew_sec = float(os.getenv("ROS_RGBD_MAX_SKEW_SEC", "0.15"))
+        self.depth_unit_scale = float(os.getenv("ROS_DEPTH_SCALE", "0.001"))
+
+        for camera_name, camera_cfg in CAMERAS.items():
+            self.camera_subscriptions.append(self.create_subscription(
+                ROSImage,
+                camera_cfg["rgb_topic"],
+                lambda msg, name=camera_name: self._rgb_callback(name, msg),
+                qos_profile_sensor_data,
+            ))
+            self.camera_subscriptions.append(self.create_subscription(
+                ROSImage,
+                camera_cfg["depth_topic"],
+                lambda msg, name=camera_name: self._depth_callback(name, msg),
+                qos_profile_sensor_data,
+            ))
+            self.camera_subscriptions.append(self.create_subscription(
+                CameraInfo,
+                camera_cfg["info_topic"],
+                lambda msg, name=camera_name: self._camera_info_callback(name, msg),
+                qos_profile_sensor_data,
+            ))
 
         self.object_tf_lock = threading.Lock()
         self.latest_object_tf_cache = None
@@ -757,9 +990,6 @@ class ROS2ImageSubscriber(Node):
                 1.0 / self.object_tf_keepalive_hz,
                 self.republish_latest_object_tfs,
             )
-
-        # Siglip state publisher: JSON payload on /siglip/result
-        self.siglip_pub = self.create_publisher(String, '/siglip/result', 10)
 
         # TF buffer and listener for reading transforms
         self.tf_buffer = Buffer()
@@ -779,127 +1009,138 @@ class ROS2ImageSubscriber(Node):
         self.last_arm = None
 
         self.get_logger().info(
-            'ROS2 node initialized; RGB-D capture will use pyrealsense2 directly'
+            f"ROS2 node initialized; subscribed to RGB-D and CameraInfo for "
+            f"{', '.join(CAMERAS)}, perception_camera={self.front_camera_name}"
         )
 
-    def start_realsense(self):
-        """Start the RealSense RGB-D pipeline on first capture."""
-        if rs is None:
-            raise RuntimeError(
-                "pyrealsense2 is not available. Please install pyrealsense2 "
-                "and run on a machine with an Intel RealSense camera."
-            )
+    @staticmethod
+    def _stamp_to_seconds(msg):
+        stamp = msg.header.stamp
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
-        with self.rs_lock:
-            if self.rs_pipeline is not None:
-                return
+    @staticmethod
+    def _image_rows(msg, bytes_per_pixel):
+        row_bytes = int(msg.width) * int(bytes_per_pixel)
+        step = int(msg.step) if int(msg.step) > 0 else row_bytes
+        raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(int(msg.height), step)
+        return raw[:, :row_bytes].copy()
 
-            pipeline = rs.pipeline()
-            config = rs.config()
-            if self.rs_serial:
-                config.enable_device(self.rs_serial)
-            config.enable_stream(
-                rs.stream.color,
-                self.rs_width,
-                self.rs_height,
-                rs.format.bgr8,
-                self.rs_fps,
-            )
-            config.enable_stream(
-                rs.stream.depth,
-                self.rs_width,
-                self.rs_height,
-                rs.format.z16,
-                self.rs_fps,
-            )
+    @classmethod
+    def _rgb_msg_to_bgr(cls, msg):
+        encoding = str(msg.encoding or "").lower()
+        if encoding in {"rgb8", "bgr8"}:
+            image = cls._image_rows(msg, 3).reshape(msg.height, msg.width, 3)
+            return image[:, :, ::-1].copy() if encoding == "rgb8" else image
+        if encoding in {"rgba8", "bgra8"}:
+            image = cls._image_rows(msg, 4).reshape(msg.height, msg.width, 4)
+            code = cv2.COLOR_RGBA2BGR if encoding == "rgba8" else cv2.COLOR_BGRA2BGR
+            return cv2.cvtColor(image, code)
+        if encoding in {"mono8", "8uc1"}:
+            image = cls._image_rows(msg, 1).reshape(msg.height, msg.width)
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        raise RuntimeError(f"Unsupported RGB image encoding: {msg.encoding}")
 
-            try:
-                profile = pipeline.start(config)
-                depth_sensor = profile.get_device().first_depth_sensor()
-                self.depth_scale = float(depth_sensor.get_depth_scale())
-                self.rs_pipeline = pipeline
-                self.rs_profile = profile
-                self.rs_align = rs.align(rs.stream.color)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    pipeline.stop()
-                raise
+    def _depth_msg_to_mm(self, msg):
+        encoding = str(msg.encoding or "").lower()
+        if encoding in {"16uc1", "mono16"}:
+            rows = self._image_rows(msg, 2)
+            depth = rows.view(np.uint16).reshape(msg.height, msg.width)
+            if bool(msg.is_bigendian) != (sys.byteorder == "big"):
+                depth = depth.byteswap()
+            return depth.copy(), self.depth_unit_scale
+        if encoding == "32fc1":
+            rows = self._image_rows(msg, 4)
+            depth_m = rows.view(np.float32).reshape(msg.height, msg.width)
+            if bool(msg.is_bigendian) != (sys.byteorder == "big"):
+                depth_m = depth_m.byteswap()
+            depth_m = np.nan_to_num(depth_m, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_mm = np.clip(
+                np.rint(depth_m / self.depth_unit_scale),
+                0,
+                np.iinfo(np.uint16).max,
+            ).astype(np.uint16)
+            return depth_mm, self.depth_unit_scale
+        raise RuntimeError(f"Unsupported depth image encoding: {msg.encoding}")
 
-            self.get_logger().info(
-                f"RealSense pipeline started: {self.rs_width}x{self.rs_height}@{self.rs_fps}, "
-                f"depth_scale={self.depth_scale:.6f}, serial={self.rs_serial or '<auto>'}"
-            )
-
-            # Drop a few startup frames so auto-exposure/depth sync can settle.
-            for _ in range(5):
-                with contextlib.suppress(Exception):
-                    pipeline.wait_for_frames(1000)
-
-    def stop_realsense(self):
-        """Stop the RealSense pipeline if it was started."""
-        with self.rs_lock:
-            pipeline = self.rs_pipeline
-            self.rs_pipeline = None
-            self.rs_profile = None
-            self.rs_align = None
-        if pipeline is not None:
-            with contextlib.suppress(Exception):
-                pipeline.stop()
-            self.get_logger().info('RealSense pipeline stopped')
-
-    def wait_for_frame(self, timeout=5.0):
-        """Capture one aligned RGB-D frame directly from RealSense."""
-        self.start_realsense()
-        deadline = time.time() + float(timeout)
-        last_error = None
-
-        with self.rs_lock:
-            pipeline = self.rs_pipeline
-            align = self.rs_align
-            if pipeline is None:
-                return None, None, None
-
-            while time.time() < deadline:
-                remaining_ms = max(1, int((deadline - time.time()) * 1000))
-                wait_ms = min(1000, remaining_ms)
-                try:
-                    frames = pipeline.wait_for_frames(wait_ms)
-                    aligned_frames = align.process(frames) if align is not None else frames
-                    color_frame = aligned_frames.get_color_frame()
-                    depth_frame = aligned_frames.get_depth_frame()
-                    if not color_frame or not depth_frame:
-                        continue
-
-                    color_image = np.asanyarray(color_frame.get_data()).copy()
-                    depth_image = np.asanyarray(depth_frame.get_data()).copy()
-                    if depth_image.dtype != np.uint16:
-                        depth_image = depth_image.astype(np.uint16)
-
-                    self.color_image = color_image
-                    self.depth_image = depth_image
-                    self.frame_received.set()
-                    return color_image.copy(), depth_image.copy(), self.depth_scale
-                except Exception as exc:
-                    last_error = exc
-
-        if last_error is not None:
-            self.get_logger().warning(f'RealSense frame capture failed: {last_error}')
-        return None, None, None
-
-    def destroy_node(self):
-        self.stop_realsense()
-        return super().destroy_node()
-
-    def publish_siglip_result(self, result):
-        """Publish Siglip state result as JSON on /siglip/result."""
+    def _rgb_callback(self, camera_name, msg):
         try:
-            msg = String()
-            msg.data = json.dumps(result, ensure_ascii=False)
-            self.siglip_pub.publish(msg)
-            return True
-        except Exception as e:
-            self.get_logger().warning(f"Failed to publish Siglip result: {e}")
-            return False
+            image = self._rgb_msg_to_bgr(msg)
+        except Exception as exc:
+            self.get_logger().warning(f"[{camera_name}] RGB decode failed: {exc}")
+            return
+        with self.camera_condition:
+            frame = self.camera_frames[camera_name]
+            frame["rgb"] = image
+            frame["rgb_stamp"] = self._stamp_to_seconds(msg)
+            frame["rgb_seq"] += 1
+            self.camera_condition.notify_all()
+
+    def _depth_callback(self, camera_name, msg):
+        try:
+            depth, depth_scale = self._depth_msg_to_mm(msg)
+        except Exception as exc:
+            self.get_logger().warning(f"[{camera_name}] depth decode failed: {exc}")
+            return
+        with self.camera_condition:
+            frame = self.camera_frames[camera_name]
+            frame["depth"] = depth
+            frame["depth_scale"] = depth_scale
+            frame["depth_stamp"] = self._stamp_to_seconds(msg)
+            frame["depth_seq"] += 1
+            self.camera_condition.notify_all()
+
+    def _camera_info_callback(self, camera_name, msg):
+        info = {
+            "width": int(msg.width),
+            "height": int(msg.height),
+            "fx": float(msg.k[0]),
+            "fy": float(msg.k[4]),
+            "cx": float(msg.k[2]),
+            "cy": float(msg.k[5]),
+            "distortion_model": str(msg.distortion_model),
+            "d": [float(value) for value in msg.d],
+        }
+        with self.camera_condition:
+            self.camera_frames[camera_name]["info"] = info
+            self.camera_condition.notify_all()
+
+    def wait_for_frame(self, timeout=5.0, camera_name=None):
+        """Wait for a new synchronized RGB-D pair from the selected ROS2 camera."""
+        camera_name = camera_name or self.front_camera_name
+        deadline = time.time() + float(timeout)
+        with self.camera_condition:
+            frame = self.camera_frames[camera_name]
+            initial_rgb_seq = frame["rgb_seq"]
+            initial_depth_seq = frame["depth_seq"]
+            while time.time() < deadline:
+                has_new_pair = (
+                    frame["rgb"] is not None
+                    and frame["depth"] is not None
+                    and frame["rgb_seq"] > initial_rgb_seq
+                    and frame["depth_seq"] > initial_depth_seq
+                )
+                skew = abs(frame["rgb_stamp"] - frame["depth_stamp"])
+                if has_new_pair and skew <= self.rgbd_max_skew_sec:
+                    self.color_image = frame["rgb"].copy()
+                    self.depth_image = frame["depth"].copy()
+                    self.depth_scale = float(frame["depth_scale"])
+                    self.frame_received.set()
+                    return (
+                        self.color_image.copy(),
+                        self.depth_image.copy(),
+                        self.depth_scale,
+                    )
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self.camera_condition.wait(timeout=min(0.1, remaining))
+
+        self.get_logger().warning(
+            f"Timed out waiting for synchronized ROS2 RGB-D: camera={camera_name}, "
+            f"rgb_topic={CAMERAS[camera_name]['rgb_topic']}, "
+            f"depth_topic={CAMERAS[camera_name]['depth_topic']}"
+        )
+        return None, None, None
 
     def _build_object_tf_message(self, poses, labels, frame_id, stamp):
         tf_msg = TFMessage()
@@ -1076,11 +1317,13 @@ class ROS2ImageSubscriber(Node):
 _ros2_node = None
 _ros2_executor = None
 _ros2_thread = None
-_siglip_worker = None
-_siglip_worker_lock = threading.Lock()
 _robotaction_node = None
 _robotaction_config = None
 _robotaction_lock = threading.Lock()
+_task_loop_thread = None
+_task_loop_stop_event = threading.Event()
+_task_loop_continue_event = threading.Event()
+_rosbag_manager = None
 _fresh_tf_callback = None
 _fresh_tf_lock = threading.RLock()
 _fresh_tf_last_run = 0.0
@@ -1289,6 +1532,268 @@ else:
     FreshTfMarvinFusionNode = None
 
 
+def _parse_task_target_value(value):
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        return [part.strip() for part in inner.split(",") if part.strip()]
+    return text
+
+
+def _load_task_yaml_steps(task_yaml_path):
+    if Step is None:
+        raise RuntimeError(f"robotaction import failed: {ROBOTACTION_IMPORT_ERROR}")
+    with open(task_yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    tasks = data.get("tasks", [])
+    if not isinstance(tasks, list) or not tasks:
+        raise ValueError(f"Task YAML has no tasks: {task_yaml_path}")
+
+    steps = []
+    for i, task in enumerate(tasks):
+        task = task or {}
+        steps.append(
+            Step(
+                action_name=task.get("action_name", f"step_{i}"),
+                target=_parse_task_target_value(task.get("targets", task.get("objects", task.get("target", "")))),
+                arm=task.get("arm"),
+                speed=task.get("speed"),
+                correction_mode=task.get("correction_mode", "org"),
+                finish_home=bool(task.get("finish_home", task.get("finfish_home", False))),
+                fixed_endpoint=task.get("fixed_endpoint", False),
+                approach_count=int(task.get("approach_count", 0) or 0),
+                status_timeout=float(task.get("status_timeout", 2.0)),
+                task_finish_timeout=float(task.get("task_finish_timeout", 60.0)),
+                policy=str(task.get("policy", "first")).strip().lower() or "first",
+            )
+        )
+    return steps
+
+
+class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
+    def __init__(
+        self,
+        object_yaml_path,
+        task_yaml_path,
+        progress_topic,
+        object_tf_topic=None,
+        base_frame="base_link",
+        camera_frames=None,
+    ):
+        if ActionHandler is None:
+            raise RuntimeError(f"robotaction import failed: {ROBOTACTION_IMPORT_ERROR}")
+        super().__init__("robotaction_task_loop")
+        self.timer_group = ReentrantCallbackGroup()
+        self.progress_group = ReentrantCallbackGroup()
+        self.object_tf_group = ReentrantCallbackGroup()
+
+        with open(object_yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            self.object_templates = data.get("templates", {})
+
+        self.task_steps = _load_task_yaml_steps(task_yaml_path)
+        self.last_arm = None
+        self.base_frame = normalize_frame_id(base_frame)
+        self.camera_frames = {
+            normalize_frame_id(v)
+            for v in (camera_frames or ["camera_rgb_link", "camera_link_rgb"])
+        }
+        self.object_tf_topic = object_tf_topic
+        self.template_handlers = {
+            k: ActionHandler(v, node=self)
+            for k, v in self.object_templates.items()
+        }
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.object_tf_watcher = None
+        if object_tf_topic and ObjectTfWatcher is not None:
+            self.object_tf_watcher = ObjectTfWatcher(
+                self,
+                topic=object_tf_topic,
+                callback_group=self.object_tf_group,
+            )
+
+        self.pose_pub = self.create_publisher(KeypointPoseArray, "/fusion_pose", 10)
+        self.action_pub = self.create_publisher(String, "/fusion/current_action", 10)
+        self.arm_resolver = ArmResolver(lambda: self.last_arm)
+        self.fixed_ep_mgr = FixedEndpointManager()
+        self.task_progress_watcher = TaskProgressWatcher(
+            self,
+            topic=progress_topic,
+            callback_group=self.progress_group,
+        )
+        self.active_state = "task_loop"
+        self.active_steps = []
+        self.active_step_idx = 0
+        self.allow_home_preempt = False
+        self._last_tf_stamp_ns = {}
+
+        self.get_logger().info(
+            f"[TaskLoop] object_yaml={object_yaml_path}, task_yaml={task_yaml_path}, "
+            f"progress_topic={progress_topic}, base_frame={self.base_frame}"
+        )
+
+    def _is_home_step(self, step: Step):
+        return str(step.action_name).strip().lower() == "home"
+
+    def _is_absolute_home_step(self, step: Step):
+        return normalize_obj_name(step.primary_target()) == "home" and not self._is_home_step(step)
+
+    def _get_preempt_state(self):
+        return None
+
+    def _publish_arm_home_three_times(self, arm):
+        """Publish one arm's home command three times without waiting for progress."""
+        arm_name = str(arm or "").strip().lower()
+        if arm_name not in {"left", "right"}:
+            return False
+        home_sequence = [{
+            "name": "home",
+            "arm": arm_name,
+            "poses": [],
+            "constraints": [100, 100, 100],
+            "speed": 1.0,
+            "gripper_value": [0.0, 0.0],
+            "time": [0.0, 0.1],
+        }]
+        for publish_index in range(3):
+            self.publish_kp_separately(home_sequence)
+            self.get_logger().info(
+                f"[TaskLoop] arm switch: publish previous arm home "
+                f"{publish_index + 1}/3 arm='{arm_name}'"
+            )
+            if publish_index < 2:
+                time.sleep(0.1)
+        self.get_logger().info(
+            f"[TaskLoop] arm switch: previous arm home published arm='{arm_name}'"
+        )
+        return True
+
+    def _execute_step_once(self, step: Step, inst: str):
+        get_last_arm = getattr(self.arm_resolver, "_get_last_arm", None)
+        previous_arm = get_last_arm() if callable(get_last_arm) else self.last_arm
+
+        # The parent resolves the current arm and builds keypoints, but does not
+        # publish them yet. This leaves a safe point to home the previous arm.
+        kps = super()._execute_step_once(step, inst)
+        current_arm = self.last_arm
+
+        previous_name = str(previous_arm or "").strip().lower()
+        current_name = str(current_arm or "").strip().lower()
+        if (
+            kps is not None
+            and previous_name in {"left", "right"}
+            and current_name in {"left", "right"}
+            and previous_name != current_name
+        ):
+            self._publish_arm_home_three_times(previous_name)
+        return kps
+
+    def _wait_step_finished(self, step: Step):
+        start = time.time()
+        finish_percentage = 0.98
+        min_runtime = max(
+            0.0,
+            float(os.getenv("TASK_LOOP_MIN_STEP_RUNTIME_SEC", "0.5")),
+        )
+        observed_new_cycle = False
+        while rclpy.ok() and not _task_loop_stop_event.is_set():
+            watcher = self.task_progress_watcher
+            with watcher._lock:
+                latest_value = watcher._latest_value
+                last_msg_time = watcher._last_msg_time
+
+            # The controller may briefly keep publishing the previous command's
+            # terminal value after reset. Do not accept that stale 1.0 as this
+            # step's completion; first require a post-reset non-terminal value.
+            if (
+                last_msg_time is not None
+                and latest_value is not None
+                and latest_value < finish_percentage
+            ):
+                observed_new_cycle = True
+
+            if (
+                observed_new_cycle
+                and (time.time() - start) >= min_runtime
+                and watcher.is_finished(
+                    silence_after_zero=0.05,
+                    finish_percentage=finish_percentage,
+                )
+            ):
+                self.get_logger().info("[TaskLoop] 当前动作完成")
+                return TaskStatus.SUCCESS
+            if (time.time() - start) >= step.task_finish_timeout:
+                self.get_logger().warning(
+                    f"[TaskLoop] 等待动作完成超时 action='{step.action_name}', "
+                    f"observed_new_cycle={observed_new_cycle}, latest={latest_value}"
+                )
+                return TaskStatus.TIMEOUT
+            time.sleep(0.2)
+        return TaskStatus.STOP
+
+    def select_target_instance(self):
+        if not self.task_steps:
+            return None
+        first_step = self.task_steps[0]
+        if _ros2_node is not None:
+            getter = getattr(_ros2_node, "current_object_child_frames", None)
+            if callable(getter):
+                latest_frames = set(getter())
+                if not latest_frames:
+                    self.get_logger().info(
+                        "[TaskLoop] latest perception contains no object TF; "
+                        "skip historical TF buffer fallback"
+                    )
+                    return None
+                frames = {frame: None for frame in latest_frames}
+                return self._select_instance(first_step, frames)
+
+        # Compatibility fallback for deployments without the local perception
+        # cache. In the integrated task-loop app, the cache above is authoritative
+        # and prevents stale transforms from an earlier frame being selected.
+        frames = self._wait_target_instances_ready(
+            first_step.target_names(),
+            timeout=2.0,
+            settle_time=0.1,
+            poll_interval=0.1,
+        )
+        return self._select_instance(first_step, frames)
+
+    def run_task_for_instance(self, inst):
+        self.active_steps = list(self.task_steps)
+        self.active_step_idx = 0
+        for idx, step in enumerate(self.active_steps):
+            if _task_loop_stop_event.is_set():
+                return TaskStatus.STOP
+            self.active_step_idx = idx
+            self._publish_current_action(step, phase="run")
+            # Clear progress left by the previous task before publishing this
+            # step. A possible arm-switch home is emitted inside _run_step().
+            self.task_progress_watcher.reset()
+            run_inst = inst
+            if self._is_absolute_home_step(step):
+                run_inst = step.primary_target()
+            self.get_logger().info(
+                f"[TaskLoop] step={idx + 1}/{len(self.active_steps)} "
+                f"target='{step.display_target()}' selected='{run_inst}' action='{step.action_name}'"
+            )
+            status = self._run_step(step, run_inst)
+            if status != TaskStatus.SUCCESS:
+                return status
+            # Start the completion window after the current action has actually
+            # been published. This excludes progress generated by the preceding
+            # action and by the unsupervised arm-switch home commands.
+            self.task_progress_watcher.reset()
+            status = self._wait_step_finished(step)
+            if status != TaskStatus.SUCCESS:
+                return status
+        return TaskStatus.SUCCESS
+
+
 def init_ros2():
     """Initialize ROS2 and create subscriber node"""
     global _ros2_node, _ros2_executor, _ros2_thread
@@ -1319,7 +1824,7 @@ def shutdown_ros2():
     global _ros2_node, _ros2_executor, _ros2_thread
 
     set_fresh_tf_callback(None)
-    stop_siglip_realtime_publisher()
+    stop_task_loop(publish_home=False)
     stop_marvin_action_node(publish_home=False, destroy=True)
 
     if _ros2_executor is not None:
@@ -1334,24 +1839,28 @@ def shutdown_ros2():
     _ros2_thread = None
 
 
-def capture_realsense_frame():
-    """Capture single aligned RGB-D frame directly from pyrealsense2."""
+def capture_ros2_frame():
+    """Capture one synchronized RGB-D pair from the configured ROS2 camera."""
     global _ros2_node
 
     if _ros2_node is None:
         init_ros2()
 
-    print("Waiting for RealSense RGB-D frames...")
+    camera_name = getattr(_ros2_node, "front_camera_name", "front")
+    print(f"Waiting for ROS2 RGB-D frames: camera={camera_name}...")
 
-    color_image, depth_image, depth_scale = _ros2_node.wait_for_frame(timeout=10.0)
+    color_image, depth_image, depth_scale = _ros2_node.wait_for_frame(
+        timeout=10.0,
+        camera_name=camera_name,
+    )
 
     if color_image is None or depth_image is None:
         raise RuntimeError(
-            "Failed to receive frames from RealSense camera. "
-            "Check camera connection, permissions, and pyrealsense2 installation."
+            f"Failed to receive synchronized RGB-D from ROS2 camera '{camera_name}'. "
+            "Check the configured image topics and ROS2 QoS."
         )
 
-    print(f"Frame captured from RealSense. Depth scale: {depth_scale}")
+    print(f"Frame captured from ROS2 camera '{camera_name}'. Depth scale: {depth_scale}")
 
     return color_image, depth_image, depth_scale
 
@@ -1389,13 +1898,13 @@ def _default_marvin_object_yaml():
     )
 
 
-def _default_marvin_status_json():
+def _default_marvin_task_yaml():
     auto_cfg = _load_auto_app_config()
     marvin_cfg = auto_cfg.get("marvin", {}) if isinstance(auto_cfg, dict) else {}
-    configured = marvin_cfg.get("status_json_path", "") if isinstance(marvin_cfg, dict) else ""
+    configured = marvin_cfg.get("task_yaml_path", "") if isinstance(marvin_cfg, dict) else ""
     return os.getenv(
-        "MARVIN_STATUS_JSON",
-        _resolve_marvin_path(configured) if configured else os.path.join(ROBOTACTION_DIR, "data", "tool", "graph_info.json"),
+        "MARVIN_TASK_YAML",
+        _resolve_marvin_path(configured) if configured else os.path.join(ROBOTACTION_DIR, "data", "tool", "task.yaml"),
     )
 
 
@@ -1409,14 +1918,9 @@ def _default_marvin_config_value(key, env_name, fallback):
 def _format_marvin_action_status():
     node = _robotaction_node
     if node is None:
-        return "Marvin动作端未启动"
+        return "TaskLoop动作端未启动"
     if getattr(node, "_fresh_tf_paused", False):
-        return "Marvin动作端已暂停"
-
-    try:
-        stable_state = node.status_watcher.get_stable_state()
-    except Exception:
-        stable_state = None
+        return "TaskLoop动作端已暂停"
 
     active_state = getattr(node, "active_state", None)
     active_steps = getattr(node, "active_steps", []) or []
@@ -1433,88 +1937,11 @@ def _format_marvin_action_status():
         step_text = "idle"
 
     return (
-        "Marvin动作端运行中\n"
-        f"- stable_state: {stable_state or '<waiting>'}\n"
+        "TaskLoop动作端运行中\n"
         f"- active_state: {active_state or '<none>'}\n"
         f"- step: {step_text}\n"
         f"- last_arm: {getattr(node, 'last_arm', None) or '<none>'}"
     )
-
-
-def start_marvin_action_node(
-    object_yaml_path=None,
-    status_json_path=None,
-    status_topic=None,
-    progress_topic=None,
-    object_tf_topic="",
-    base_frame=None,
-    camera_frames=None,
-):
-    global _robotaction_node, _robotaction_config
-
-    if MarvinFusionNode is None:
-        raise RuntimeError(f"Marvin robotaction import failed: {ROBOTACTION_IMPORT_ERROR}")
-
-    ros_node = init_ros2()
-    object_yaml_path = _resolve_marvin_path(object_yaml_path or _default_marvin_object_yaml())
-    status_json_path = _resolve_marvin_path(status_json_path or _default_marvin_status_json())
-    status_topic = str(
-        status_topic or _default_marvin_config_value("status_topic", "MARVIN_STATUS_TOPIC", "/siglip/result")
-    ).strip() or "/siglip/result"
-    progress_topic = str(
-        progress_topic
-        or _default_marvin_config_value("progress_topic", "MARVIN_PROGRESS_TOPIC", "/control/task_percentage")
-    ).strip() or "/control/task_percentage"
-    object_tf_topic = str(
-        object_tf_topic or _default_marvin_config_value("object_tf_topic", "MARVIN_OBJECT_TF_TOPIC", "")
-    ).strip()
-    base_frame = str(
-        base_frame or _default_marvin_config_value("base_frame", "MARVIN_BASE_FRAME", "base_link")
-    ).strip() or "base_link"
-    camera_frames = camera_frames or ["camera_rgb_link", "camera_link_rgb"]
-
-    if not os.path.isfile(object_yaml_path):
-        raise FileNotFoundError(f"Marvin object YAML not found: {object_yaml_path}")
-    if not os.path.isfile(status_json_path):
-        raise FileNotFoundError(f"Marvin status graph JSON not found: {status_json_path}")
-
-    config = {
-        "object_yaml_path": object_yaml_path,
-        "status_json_path": status_json_path,
-        "status_topic": status_topic,
-        "progress_topic": progress_topic,
-        "object_tf_topic": object_tf_topic,
-        "base_frame": base_frame,
-        "camera_frames": tuple(camera_frames),
-    }
-
-    with _robotaction_lock:
-        if _robotaction_node is not None:
-            if _robotaction_config == config:
-                resume = getattr(_robotaction_node, "resume_after_stop", None)
-                if callable(resume) and resume():
-                    return _robotaction_node, "Marvin动作端已恢复"
-                return _robotaction_node, "Marvin动作端已在运行"
-            _stop_marvin_action_node_locked(publish_home=False, destroy=True)
-
-        node_cls = FreshTfMarvinFusionNode or MarvinFusionNode
-        node = node_cls(
-            object_yaml_path=object_yaml_path,
-            status_json_path=status_json_path,
-            status_topic=status_topic,
-            progress_topic=progress_topic,
-            object_tf_topic=object_tf_topic or None,
-            base_frame=base_frame,
-            camera_frames=list(camera_frames),
-        )
-        _ros2_executor.add_node(node)
-        _robotaction_node = node
-        _robotaction_config = config
-        ros_node.get_logger().info(
-            f"Marvin robotaction started: status_topic={status_topic}, "
-            f"object_yaml={object_yaml_path}, graph={status_json_path}"
-        )
-        return node, "Marvin动作端已启动，监听 /siglip/result 并发布 /fusion_pose"
 
 
 def _stop_marvin_action_node_locked(publish_home=False, destroy=False):
@@ -1551,452 +1978,85 @@ def stop_marvin_action_node(publish_home=False, destroy=False):
         return _stop_marvin_action_node_locked(publish_home=publish_home, destroy=destroy)
 
 
+def start_task_loop_node(
+    object_yaml_path=None,
+    task_yaml_path=None,
+    progress_topic=None,
+    object_tf_topic="",
+    base_frame=None,
+    camera_frames=None,
+):
+    global _robotaction_node, _robotaction_config
 
-class SiglipQuickGELU(torch.nn.Module):
-    def forward(self, x):
-        return x * torch.sigmoid(1.702 * x)
-
-
-class SiglipResidualAttentionBlock(torch.nn.Module):
-    def __init__(self, d_model, n_head, mlp_ratio=4.0):
-        super().__init__()
-        self.attn = torch.nn.MultiheadAttention(d_model, n_head, batch_first=True)
-        self.ln_1 = torch.nn.LayerNorm(d_model)
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(d_model, int(d_model * mlp_ratio)),
-            SiglipQuickGELU(),
-            torch.nn.Linear(int(d_model * mlp_ratio), d_model),
-        )
-        self.ln_2 = torch.nn.LayerNorm(d_model)
-
-    def forward(self, x, attn_mask=None):
-        norm_x = self.ln_1(x)
-        attn_out, _ = self.attn(
-            norm_x,
-            norm_x,
-            norm_x,
-            attn_mask=attn_mask,
-            need_weights=False,
-        )
-        x = x + attn_out
-        x = x + self.mlp(self.ln_2(x))
-        return x
-
-
-class SiglipLASTViTVisionEncoder(torch.nn.Module):
-    """LAST-ViT vision encoder copied from SiglipDocker ZeroMQServer_lastvit."""
-
-    def __init__(self, embed_dim=512, image_size=224, patch_size=16,
-                 width=768, layers=12, heads=12, mlp_ratio=4.0):
-        super().__init__()
-        self.image_size = image_size
-        self.patch_size = patch_size
-        self.grid_size = image_size // patch_size
-        self.width = width
-        scale = width ** -0.5
-
-        self.conv1 = torch.nn.Conv2d(3, width, kernel_size=patch_size, stride=patch_size, bias=False)
-        num_patches = self.grid_size * self.grid_size
-        self.class_embedding = torch.nn.Parameter(scale * torch.randn(width))
-        self.positional_embedding = torch.nn.Parameter(scale * torch.randn(num_patches + 1, width))
-        self.ln_pre = torch.nn.LayerNorm(width)
-        self.transformer = torch.nn.Sequential(*[
-            SiglipResidualAttentionBlock(width, heads, mlp_ratio) for _ in range(layers)
-        ])
-        self.ln_post = torch.nn.LayerNorm(width)
-        self.proj = torch.nn.Parameter(scale * torch.randn(width, embed_dim))
-        self.register_buffer('_cached_gaussian', None, persistent=False)
-
-    def _build_gaussian_kernel(self, device):
-        w = self.width
-        kernel = torch.exp(-0.5 * (torch.arange(-w // 2 + 1, w // 2 + 1, device=device).float() / (w ** 0.5)) ** 2)
-        return (kernel / kernel.max()).unsqueeze(0).unsqueeze(0)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        bsz, channels, height, width = x.shape
-        x = x.reshape(bsz, channels, height * width).permute(0, 2, 1).contiguous()
-        cls_token = self.class_embedding.view(1, 1, -1).expand(bsz, -1, -1)
-        x = torch.cat([cls_token, x], dim=1) + self.positional_embedding.unsqueeze(0)
-        x = self.ln_pre(x)
-        x = self.transformer(x)
-
-        if self._cached_gaussian is None or self._cached_gaussian.device != x.device:
-            self._cached_gaussian = self._build_gaussian_kernel(x.device)
-        x_detach = x[:, 1:]
-        x_f = torch.fft.fftshift(torch.fft.fft(x_detach, dim=-1), dim=-1)
-        x_smooth = torch.fft.ifft(torch.fft.ifftshift(x_f * self._cached_gaussian, dim=-1), dim=-1).real
-        diff = x_detach / torch.abs(x_smooth - x_detach).clamp(min=1e-8)
-        _, idx = torch.topk(diff, k=1, dim=1, largest=True)
-        x = torch.mean(torch.gather(x_detach, 1, idx), dim=1)
-        x = self.ln_post(x)
-        return x @ self.proj if self.proj is not None else x
-
-
-def _load_siglip_config():
-    config_path = os.getenv("SIGLIP_CONFIG", "").strip() or SIGLIP_CONFIG_PATH
-    auto_cfg = _load_auto_app_config()
-    siglip_cfg = auto_cfg.get("siglip", {}) if isinstance(auto_cfg, dict) else {}
-    if siglip_cfg and not os.getenv("SIGLIP_CONFIG", "").strip():
-        return siglip_cfg
-
-    config_path = _resolve_siglip_path(config_path)
-    if not os.path.isfile(config_path):
-        raise FileNotFoundError(f"Siglip config not found: {config_path}")
-    return _load_yaml_config_file(config_path)
-
-
-def _resolve_siglip_path(raw_path=""):
-    candidate = str(raw_path or "").strip()
-    if not candidate:
-        return ""
-    if os.path.exists(candidate):
-        return candidate
-    if candidate == "/workspace/config.yaml":
-        return SIGLIP_CONFIG_PATH
-    if candidate.startswith("/workspace/"):
-        mapped = os.path.join(SIGLIP_DOCKER_DIR, candidate[len("/workspace/"):])
-        if os.path.exists(mapped):
-            return mapped
-    mapped = os.path.join(AUTO_APP_DIR, candidate)
-    if os.path.exists(mapped):
-        return mapped
-    mapped = os.path.join(SIGLIP_DOCKER_DIR, candidate)
-    if os.path.exists(mapped):
-        return mapped
-    return candidate
-
-
-def _siglip_parse_center_feature(value):
-    if isinstance(value, str):
-        text = value.strip()
-        try:
-            value = json.loads(text)
-        except Exception:
-            value = ast.literal_eval(text)
-
-    arr = np.array(value, dtype=np.float32)
-    if arr.ndim != 1:
-        raise ValueError(f"center feature must be 1D, got shape={arr.shape}")
-
-    norm = np.linalg.norm(arr)
-    if norm > 0:
-        arr = arr / norm
-    return arr
-
-
-def _siglip_jsonable_result(result):
-    if isinstance(result, dict):
-        return {str(k): _siglip_jsonable_result(v) for k, v in result.items()}
-    if isinstance(result, (list, tuple)):
-        return [_siglip_jsonable_result(v) for v in result]
-    if isinstance(result, np.ndarray):
-        return result.tolist()
-    if isinstance(result, np.integer):
-        return int(result)
-    if isinstance(result, np.floating):
-        return float(result)
-    return result
-
-
-class SiglipStateEstimator:
-    def __init__(self, device=None):
-        if TVF is None or InterpolationMode is None:
-            raise RuntimeError(f"torchvision import failed: {SIGLIP_TORCHVISION_IMPORT_ERROR}")
-
-        cfg = _load_siglip_config()
-        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
-        self.checkpoint_path = _resolve_siglip_path(
-            os.getenv("SIGLIP_CHECKPOINT", "").strip() or model_cfg.get("checkpoint", "")
-        )
-        self.graph_info_path = _resolve_siglip_path(
-            os.getenv("SIGLIP_GRAPH_INFO", "").strip()
-            or model_cfg.get("graph_info_file", "")
-            or model_cfg.get("cache_file", "")
-        )
-        self.device = "cuda" if str(device or "").startswith("cuda") and torch.cuda.is_available() else "cpu"
-        if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        inference_cfg = cfg.get("inference", {}) if isinstance(cfg, dict) else {}
-        self.topk = int(os.getenv("SIGLIP_TOPK", str(inference_cfg.get("topk", 5))))
-        self.image_size = int(os.getenv("SIGLIP_IMAGE_SIZE", str(inference_cfg.get("image_size", 224))))
-        self.pad_head_ratio = float(
-            os.getenv("SIGLIP_PAD_HEAD_RATIO", str(inference_cfg.get("pad_head_ratio", 0.25)))
-        )
-        self.lock = threading.Lock()
-
-        self.model = self._load_model()
-        self.centers, self.state_list = self._load_centers(self.graph_info_path)
-        print(
-            f"[Siglip] LAST-ViT ready on {self.device}, states={len(self.state_list)}, "
-            f"checkpoint={self.checkpoint_path}, graph={self.graph_info_path}"
-        )
-
-    def _load_model(self):
-        if not os.path.isfile(self.checkpoint_path):
-            raise FileNotFoundError(f"Siglip checkpoint not found: {self.checkpoint_path}")
-
-        model = SiglipLASTViTVisionEncoder(embed_dim=512)
-        checkpoint = torch.load(self.checkpoint_path, map_location="cpu", weights_only=False)
-        state_dict = checkpoint.get("model_state_dict", checkpoint)
-
-        vision_state = {}
-        for key, value in state_dict.items():
-            if key.startswith("vision_encoder."):
-                vision_state[key[len("vision_encoder."):]] = value
-
-        if not vision_state:
-            raise RuntimeError(f"No vision_encoder weights found in {self.checkpoint_path}")
-
-        missing, unexpected = model.load_state_dict(vision_state, strict=False)
-        missing = [k for k in missing if "cached" not in k]
-        if missing:
-            print(f"[Siglip] missing keys: {missing[:5]}")
-        if unexpected:
-            print(f"[Siglip] unexpected keys: {unexpected[:5]}")
-
-        model = model.to(self.device)
-        model.eval()
-        return model
-
-    def _load_centers(self, path):
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"Siglip graph info not found: {path}")
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        nodes = data.get("nodes", [])
-
-        def _node_key(node):
-            try:
-                return int(node.get("node_id", 0))
-            except Exception:
-                return 10 ** 9
-
-        centers = {}
-        state_list = []
-        idx = 0
-        for node in sorted(nodes, key=_node_key):
-            desc = str(node.get("state_description", "")).strip()
-            center_raw = (
-                node.get("center_feature_lastvit", None)
-                or node.get("center_feature_siglip2", None)
-                or node.get("center_feature", None)
-            )
-            node_id = str(node.get("node_id", "")).strip()
-            if not desc or center_raw is None:
-                continue
-
-            idx += 1
-            cid = f"C{idx}"
-            category = f"{cid}: {desc}"
-            centers[category] = _siglip_parse_center_feature(center_raw)
-            state_list.append({
-                "id": cid,
-                "node_id": node_id,
-                "name": desc,
-                "category": category,
-            })
-
-        if not centers:
-            raise RuntimeError(f"No valid Siglip centers loaded from {path}")
-        return centers, state_list
-
-    def _apply_padding_head(self, image):
-        if self.pad_head_ratio <= 0:
-            return image
-        image = image.copy()
-        width, height = image.size
-        cutoff = int(height * self.pad_head_ratio)
-        if cutoff <= 0:
-            return image
-        pixels = image.load()
-        for y in range(cutoff):
-            for x in range(width):
-                pixels[x, y] = (0, 0, 0)
-        return image
-
-    def _preprocess_image(self, image):
-        img = TVF.resize(image, [self.image_size, self.image_size], interpolation=InterpolationMode.BICUBIC)
-        img = TVF.to_tensor(img)
-        img = TVF.normalize(
-            img,
-            mean=[0.48145466, 0.4578275, 0.40821073],
-            std=[0.26862954, 0.26130258, 0.27577711],
-        )
-        return img.unsqueeze(0)
-
-    @torch.inference_mode()
-    def _encode_image(self, image):
-        pixel_values = self._preprocess_image(image).to(self.device)
-        feature = self.model(pixel_values)
-        feature = feature / feature.norm(dim=-1, keepdim=True).clamp(min=1e-12)
-        return feature[0].detach().cpu().numpy().astype(np.float32)
-
-    def _state_for_category(self, category):
-        category = str(category or "").strip()
-        for state in self.state_list:
-            if str(state.get("category", "")).strip() == category:
-                return state
-        if ":" in category:
-            state_id = category.split(":", 1)[0].strip()
-            for state in self.state_list:
-                if str(state.get("id", "")).strip() == state_id:
-                    return state
-        for state in self.state_list:
-            if str(state.get("name", "")).strip() == category:
-                return state
-        return None
-
-    def predict(self, image_bgr):
-        start_time = time.perf_counter()
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(image_rgb).convert("RGB")
-        image = self._apply_padding_head(image)
-
-        with self.lock:
-            feat_np = self._encode_image(image)
-            sims = {k: float(np.dot(feat_np, v)) for k, v in self.centers.items()}
-
-        best_category, best_similarity = max(sims.items(), key=lambda item: item[1])
-        topk = sorted(sims.items(), key=lambda item: item[1], reverse=True)[:self.topk]
-        best_state = self._state_for_category(best_category) or {}
-        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-
-        return {
-            "ok": True,
-            "module": "SiglipDocker-LASTViT",
-            "best_category": best_category,
-            "best_similarity": float(best_similarity),
-            "best_state_id": str(best_state.get("id", "")),
-            "best_node_id": str(best_state.get("node_id", "")),
-            "best_state_name": str(best_state.get("name", "")),
-            "topk": [
-                {"category": category, "similarity": float(similarity)}
-                for category, similarity in topk
-            ],
-            "elapsed_ms": float(elapsed_ms),
-        }
-
-
-class SiglipRealtimePublisher:
-    def __init__(self, ros_node, estimator, topic="/siglip/result"):
-        self.ros_node = ros_node
-        self.estimator = estimator
-        self.topic = topic
-        self.stop_event = threading.Event()
-        self.thread = None
-        self.seq = 0
-        auto_cfg = _load_auto_app_config()
-        siglip_cfg = auto_cfg.get("siglip", {}) if isinstance(auto_cfg, dict) else {}
-        runtime_cfg = siglip_cfg.get("runtime", {}) if isinstance(siglip_cfg, dict) else {}
-        self.frame_id = os.getenv("SIGLIP_FRAME_ID", str(runtime_cfg.get("frame_id", "camera_rgb_link")))
-        self.capture_timeout = max(
-            0.1,
-            float(os.getenv("SIGLIP_CAPTURE_TIMEOUT", str(runtime_cfg.get("capture_timeout", 2.0)))),
-        )
-        self.log_every = max(1, int(os.getenv("SIGLIP_LOG_EVERY", str(runtime_cfg.get("log_every", 10)))))
-
-    def start(self):
-        if self.thread is not None and self.thread.is_alive():
-            return
-        self.stop_event.clear()
-        self.thread = threading.Thread(target=self._run, name="siglip-realtime-publisher", daemon=True)
-        self.thread.start()
-        self.ros_node.get_logger().info(
-            f"Siglip realtime publisher started: topic={self.topic}, running at raw inference speed"
-        )
-
-    def stop(self, timeout=3.0):
-        self.stop_event.set()
-        if self.thread is not None:
-            self.thread.join(timeout=timeout)
-
-    def is_alive(self):
-        return self.thread is not None and self.thread.is_alive()
-
-    def _publish(self, result):
-        payload = _siglip_jsonable_result(result)
-        if hasattr(self.ros_node, "publish_siglip_result"):
-            return self.ros_node.publish_siglip_result(payload)
-        return False
-
-    def _run(self):
-        while not self.stop_event.is_set() and rclpy.ok():
-            loop_start = time.perf_counter()
-            self.seq += 1
-            result = {
-                "ok": False,
-                "module": "SiglipDocker-LASTViT",
-                "sequence": self.seq,
-                "frame_id": self.frame_id,
-                "stamp": time.time(),
-            }
-
-            try:
-                color_image, _, _ = self.ros_node.wait_for_frame(timeout=self.capture_timeout)
-                if color_image is None:
-                    raise RuntimeError("RealSense RGB frame timeout")
-                result.update(self.estimator.predict(color_image))
-                result["sequence"] = self.seq
-                result["frame_id"] = self.frame_id
-                result["stamp"] = time.time()
-            except Exception as e:
-                result["error"] = str(e)
-
-            elapsed = time.perf_counter() - loop_start
-            result["loop_elapsed_ms"] = float(elapsed * 1000.0)
-            if elapsed > 0:
-                result["loop_fps"] = float(1.0 / elapsed)
-
-            self._publish(result)
-
-            # if self.seq % self.log_every == 0:
-            #     if result.get("ok"):
-            #         self.ros_node.get_logger().info(
-            #             "[Siglip] seq=%d state=%s sim=%.4f loop=%.1fms" % (
-            #                 self.seq,
-            #                 result.get("best_category", "unknown"),
-            #                 float(result.get("best_similarity", 0.0)),
-            #                 float(result.get("loop_elapsed_ms", 0.0)),
-            #             )
-            #         )
-            #     else:
-            #         self.ros_node.get_logger().warning(
-            #             f"[Siglip] seq={self.seq} error={result.get('error', 'unknown')}"
-            #         )
-
-
-
-def start_siglip_realtime_publisher(device=None):
-    global _siglip_worker
-
-    enabled = os.getenv("SIGLIP_ENABLE", "1").strip().lower() not in {"0", "false", "no", "off"}
-    if not enabled:
-        return None, "Siglip实时状态线程已通过 SIGLIP_ENABLE=0 禁用"
+    if TaskLoopActionNode is None:
+        raise RuntimeError(f"TaskLoop robotaction import failed: {ROBOTACTION_IMPORT_ERROR}")
 
     ros_node = init_ros2()
-    with _siglip_worker_lock:
-        auto_cfg = _load_auto_app_config()
-        siglip_cfg = auto_cfg.get("siglip", {}) if isinstance(auto_cfg, dict) else {}
-        runtime_cfg = siglip_cfg.get("runtime", {}) if isinstance(siglip_cfg, dict) else {}
-        topic = os.getenv("SIGLIP_TOPIC", str(runtime_cfg.get("topic", "/siglip/result")))
-        if _siglip_worker is not None and _siglip_worker.is_alive():
-            return _siglip_worker, f"Siglip实时状态线程已在运行，发布到 {topic}"
+    object_yaml_path = _resolve_marvin_path(object_yaml_path or _default_marvin_object_yaml())
+    task_yaml_path = _resolve_marvin_path(task_yaml_path or _default_marvin_task_yaml())
+    progress_topic = str(
+        progress_topic
+        or _default_marvin_config_value("progress_topic", "MARVIN_PROGRESS_TOPIC", "/control/task_percentage")
+    ).strip() or "/control/task_percentage"
+    object_tf_topic = str(
+        object_tf_topic or _default_marvin_config_value("object_tf_topic", "MARVIN_OBJECT_TF_TOPIC", "")
+    ).strip()
+    base_frame = str(
+        base_frame or _default_marvin_config_value("base_frame", "MARVIN_BASE_FRAME", "base_link")
+    ).strip() or "base_link"
+    camera_frames = camera_frames or ["camera_rgb_link", "camera_link_rgb"]
 
-        estimator = SiglipStateEstimator(device)
-        _siglip_worker = SiglipRealtimePublisher(ros_node, estimator, topic=topic)
-        _siglip_worker.start()
-        return _siglip_worker, f"Siglip实时状态线程已启动，发布到 {topic}"
+    if not os.path.isfile(object_yaml_path):
+        raise FileNotFoundError(f"Marvin object YAML not found: {object_yaml_path}")
+    if not os.path.isfile(task_yaml_path):
+        raise FileNotFoundError(f"Marvin task YAML not found: {task_yaml_path}")
+
+    config = {
+        "mode": "task_loop",
+        "object_yaml_path": object_yaml_path,
+        "task_yaml_path": task_yaml_path,
+        "progress_topic": progress_topic,
+        "object_tf_topic": object_tf_topic,
+        "base_frame": base_frame,
+        "camera_frames": tuple(camera_frames),
+    }
+
+    with _robotaction_lock:
+        if _robotaction_node is not None:
+            if _robotaction_config == config:
+                return _robotaction_node, "TaskLoop动作端已在运行"
+            _stop_marvin_action_node_locked(publish_home=False, destroy=True)
+
+        node = TaskLoopActionNode(
+            object_yaml_path=object_yaml_path,
+            task_yaml_path=task_yaml_path,
+            progress_topic=progress_topic,
+            object_tf_topic=object_tf_topic or None,
+            base_frame=base_frame,
+            camera_frames=list(camera_frames),
+        )
+        _ros2_executor.add_node(node)
+        _robotaction_node = node
+        _robotaction_config = config
+        ros_node.get_logger().info(
+            f"TaskLoop robotaction started: object_yaml={object_yaml_path}, task_yaml={task_yaml_path}"
+        )
+        return node, "TaskLoop动作端已启动，按 task.yaml 循环发布 /fusion_pose"
 
 
-def stop_siglip_realtime_publisher():
-    global _siglip_worker
-    with _siglip_worker_lock:
-        worker = _siglip_worker
-        _siglip_worker = None
-    if worker is not None:
-        worker.stop()
+def stop_task_loop(publish_home=False):
+    global _task_loop_thread
+    _task_loop_stop_event.set()
+    _task_loop_continue_event.set()
+    if publish_home and _robotaction_node is not None:
+        with contextlib.suppress(Exception):
+            _robotaction_node.publish_home_both()
+    thread = _task_loop_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=1.0)
+    _task_loop_thread = None
+    return True
+
 
 
 def _load_sam3_config():
@@ -2321,6 +2381,114 @@ def create_combined_mask(masks):
     return combined_mask, obj_ids
 
 
+def _load_work_area():
+    cfg = _load_auto_app_config()
+    area = cfg.get("work_area", {}) if isinstance(cfg, dict) else {}
+    try:
+        return {
+            "x_min": float(area["x_min"]),
+            "x_max": float(area["x_max"]),
+            "y_min": float(area["y_min"]),
+            "y_max": float(area["y_max"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _filter_flowpose_by_work_area(
+    pose_all,
+    length_all,
+    labels,
+    objects=None,
+    camera_frame="camera_rgb_link",
+    base_frame="base_link",
+):
+    poses = np.asarray(pose_all, dtype=np.float32) if pose_all is not None else np.empty((0, 4, 4), dtype=np.float32)
+    lengths = np.asarray(length_all, dtype=np.float32) if length_all is not None else np.empty((0,), dtype=np.float32)
+    labels = list(labels or [])
+    objects = list(objects or [])
+    area = _load_work_area()
+    count = min(len(poses), len(lengths), len(labels))
+
+    if count == 0:
+        return {
+            "pose_all": None,
+            "length_all": None,
+            "labels": [],
+            "objects": [],
+            "statuses": [],
+            "base_poses": [],
+            "out_of_area_count": 0,
+            "area_check_available": area is not None,
+        }
+
+    base_to_camera = None
+    if area is not None and _ros2_node is not None and transform_to_matrix is not None:
+        ts = _ros2_node.lookup_transform(base_frame, camera_frame, timeout=0.5)
+        if ts is not None:
+            base_to_camera = transform_to_matrix(ts.transform)
+
+    keep_indices = []
+    statuses = []
+    base_poses = []
+    for i in range(count):
+        base_pose = None
+        in_area = True
+        reason = "in area"
+        if area is None:
+            reason = "area disabled"
+        elif base_to_camera is None:
+            reason = "area unknown"
+        else:
+            base_pose = base_to_camera @ poses[i]
+            x, y, z = [float(v) for v in base_pose[:3, 3]]
+            in_area = (
+                area["x_min"] <= x <= area["x_max"]
+                and area["y_min"] <= y <= area["y_max"]
+            )
+            reason = "in area" if in_area else "out of area"
+            base_poses.append(base_pose.tolist())
+
+        statuses.append({
+            "label": labels[i],
+            "in_area": bool(in_area),
+            "status": reason,
+            "base_xyz": (
+                [float(v) for v in base_pose[:3, 3]]
+                if base_pose is not None
+                else None
+            ),
+        })
+        xyz_text = (
+            "None"
+            if base_pose is None
+            else "[%.3f, %.3f, %.3f]" % tuple(base_pose[:3, 3])
+        )
+        print(
+            f"[WorkArea] label={labels[i]!r}, base_xyz={xyz_text}, "
+            f"status={reason}"
+        )
+        if in_area:
+            keep_indices.append(i)
+
+    filtered_objects = []
+    for i in keep_indices:
+        obj = dict(objects[i]) if i < len(objects) and isinstance(objects[i], dict) else {}
+        obj["work_area"] = statuses[i]
+        filtered_objects.append(obj)
+
+    return {
+        "pose_all": poses[keep_indices].tolist() if keep_indices else None,
+        "length_all": lengths[keep_indices].tolist() if keep_indices else None,
+        "labels": [labels[i] for i in keep_indices],
+        "objects": filtered_objects,
+        "statuses": statuses,
+        "base_poses": base_poses,
+        "out_of_area_count": sum(1 for item in statuses if not item["in_area"]),
+        "area_check_available": area is None or base_to_camera is not None,
+    }
+
+
 VIS_PALETTE_BGR = [
     (75, 62, 20),
     (25, 72, 80),
@@ -2362,7 +2530,7 @@ def _draw_translucent_rect(img, x1, y1, x2, y2, color, alpha):
 
 
 def _draw_label_chip(img, label, anchor, color, index):
-    text = _safe_tf_label(label)
+    text = str(label or "object").strip().replace("_", " ")
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.52
     thickness = 1
@@ -2429,18 +2597,30 @@ def visualize_sam_results(color_image, masks, labels, draw_labels=False):
     return vis
 
 
-def visualize_mask_pose_results(color_image, masks, labels, pose_all, length_all, estimator):
+def visualize_mask_pose_results(
+    color_image,
+    masks,
+    labels,
+    pose_all,
+    length_all,
+    estimator,
+    work_area_statuses=None,
+):
     """Compose mask and pose into one polished frame with one label per object."""
     vis = _stylize_frame_for_overlay(color_image)
     label_anchors = []
+    work_area_statuses = list(work_area_statuses or [])
 
     for i, (mask, label) in enumerate(zip(masks or [], labels or [])):
-        color = VIS_PALETTE_BGR[i % len(VIS_PALETTE_BGR)]
+        area_status = work_area_statuses[i] if i < len(work_area_statuses) else {}
+        out_of_area = area_status.get("status") == "out of area"
+        color = (40, 40, 235) if out_of_area else VIS_PALETTE_BGR[i % len(VIS_PALETTE_BGR)]
         bbox = _apply_animated_mask_overlay(vis, mask, color)
         if bbox is None:
             continue
         x1, y1, x2, y2 = bbox
-        label_anchors.append((label, (x1, max(8, y1 - 34)), color, i + 1))
+        display_label = f"{label} | out of area" if out_of_area else label
+        label_anchors.append((display_label, (x1, max(8, y1 - 34)), color, i + 1))
 
         # A subtle target mark at the mask center gives the still image a motion-graphic feel.
         cx = int((x1 + x2) * 0.5)
@@ -2469,13 +2649,16 @@ def auto_reuse_points_with_check(state_dict, iou_min_th=0.4, iou_mean_th=0.6):
 
 def create_gradio_interface():
     """创建Gradio界面"""
+    global _rosbag_manager
+
+    if _rosbag_manager is None:
+        _rosbag_manager = RosbagProcessManager(_load_auto_app_config())
 
     # 全局状态
     state_dict = {
         "sam3_segmenter": None,
         "sam3_detections": [],
         "flowpose_estimator": None,
-        "siglip_worker": None,
         "marvin_action_node": None,
         "color_image": None,
         "depth_image": None,
@@ -2503,12 +2686,18 @@ def create_gradio_interface():
         "trackers": [],
         "tracking_enabled": False,
         "perception_lock": threading.RLock(),
+        "ui_lock": threading.Lock(),
+        "latest_task_loop_image": None,
+        "latest_task_loop_status": "",
+        "latest_task_loop_iteration": 0,
+        "task_loop_ui_status": "TaskLoop动作端未启动",
+        "task_loop_waiting_continue": False,
         "suppress_contained_masks": _env_bool("SAM3_SUPPRESS_CONTAINED_MASKS", True),
     }
 
     # Default YAML paths
     DEFAULT_MARVIN_OBJECT_YAML = _default_marvin_object_yaml()
-    DEFAULT_MARVIN_STATUS_JSON = _default_marvin_status_json()
+    DEFAULT_MARVIN_TASK_YAML = _default_marvin_task_yaml()
     auto_app_cfg = _load_auto_app_config()
     sam3_app_cfg = auto_app_cfg.get("sam3", {}) if isinstance(auto_app_cfg, dict) else {}
     DEFAULT_SAM3_PROMPTS = os.getenv(
@@ -2516,7 +2705,7 @@ def create_gradio_interface():
         str(
             sam3_app_cfg.get(
                 "prompts",
-                "basket, control, grey screwdriver, yellow screwdriver, saw, knife, pliers, graver",
+                "basket, control, grey screwdriver, yellow screwdriver, black screwdriver, saw, knife, pliers, graver, glass scraper",
             )
         ),
     )
@@ -2535,26 +2724,17 @@ def create_gradio_interface():
         if state_dict["flowpose_estimator"] is None:
             state_dict["flowpose_estimator"] = FlowPoseEstimator(device)
 
-        try:
-            siglip_worker, siglip_status = start_siglip_realtime_publisher(device)
-            state_dict["siglip_worker"] = siglip_worker
-        except Exception as e:
-            siglip_status = f"⚠️ Siglip实时状态线程启动失败: {e}"
-            state_dict["siglip_worker"] = None
-            print(siglip_status)
-
         msg_status = "✅" if HAS_KEYPOINT_MSG else "⚠️ (无KeypointPose消息)"
         return (
             f"✅ 模型初始化完成 (设备: {device})\n"
             f"🧠 SAM3语义分割已就绪\n"
             f"🎯 FlowPose姿态估计已就绪\n"
-            f"🛰️ {siglip_status}\n"
             f"📡 ROS2节点已启动 {msg_status}"
         )
 
     def capture_frame():
-        """捕获RealSense帧，后续由SAM3语义prompt分割。"""
-        color_image, depth_image, depth_scale = capture_realsense_frame()
+        """捕获ROS2 front相机帧，后续由SAM3语义prompt分割。"""
+        color_image, depth_image, depth_scale = capture_ros2_frame()
         if _ros2_node is not None:
             _ros2_node.clear_object_tf_cache()
         state_dict["color_image"] = color_image
@@ -2569,7 +2749,7 @@ def create_gradio_interface():
         state_dict["trackers"] = []
 
         rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-        return rgb_image, f"✅ 已捕获RealSense图像 (深度缩放: {depth_scale:.6f})"
+        return rgb_image, f"✅ 已捕获ROS2 front图像 (深度缩放: {depth_scale:.6f})"
 
     def run_sam_segmentation(prompts_text, suppress_contained_masks=None):
         """使用SAM3语义prompt直接分割目标。"""
@@ -2630,7 +2810,7 @@ def create_gradio_interface():
         if state_dict["flowpose_estimator"] is None:
             return None, "❌ 请先初始化模型"
         if state_dict["color_image"] is None or state_dict["depth_image"] is None:
-            return None, "❌ 请先捕获RealSense图像"
+            return None, "❌ 请先捕获ROS2 front图像"
 
         combined_mask, obj_ids = create_combined_mask(state_dict["masks"])
         if combined_mask is None or not obj_ids:
@@ -2650,42 +2830,62 @@ def create_gradio_interface():
         except Exception as e:
             return None, f"❌ FlowPose姿态估计失败: {e}"
 
-        pose_all = flowpose_result.get("pose_all")
-        length_all = flowpose_result.get("length_all")
-        objects = flowpose_result.get("objects", [])
+        all_pose = flowpose_result.get("pose_all")
+        all_length = flowpose_result.get("length_all")
+        all_objects = flowpose_result.get("objects", [])
+        area_result = _filter_flowpose_by_work_area(
+            all_pose,
+            all_length,
+            labels,
+            all_objects,
+        )
+        pose_all = area_result["pose_all"]
+        length_all = area_result["length_all"]
+        filtered_labels = area_result["labels"]
+        objects = area_result["objects"]
 
+        flowpose_result["pose_all"] = pose_all
+        flowpose_result["length_all"] = length_all
+        flowpose_result["objects"] = objects
+        flowpose_result["work_area"] = area_result
         state_dict["pose_results"] = pose_all
         state_dict["length_results"] = length_all
+        state_dict["labels"] = filtered_labels
         state_dict["data_results"] = flowpose_result
 
         if pose_all is not None and _ros2_node is not None:
-            all_final_pose = np.asarray(pose_all, dtype=np.float32)
-            _ros2_node.publish_poses_as_tf(all_final_pose, labels)
+            _ros2_node.publish_poses_as_tf(
+                np.asarray(pose_all, dtype=np.float32),
+                filtered_labels,
+            )
 
         vis = visualize_mask_pose_results(
             state_dict["color_image"],
             state_dict.get("masks") or [],
             labels,
-            pose_all,
-            length_all,
+            all_pose,
+            all_length,
             state_dict["flowpose_estimator"],
+            work_area_statuses=area_result["statuses"],
         )
         vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
         return (
             vis_rgb,
-            f"✅ FlowPose姿态估计完成, objects={len(objects)}, elapsed={flowpose_result.get('elapsed_sec', 0.0)}s\n"
+            f"✅ FlowPose姿态估计完成, objects={len(objects)}, "
+            f"out_of_area={area_result['out_of_area_count']}, "
+            f"elapsed={flowpose_result.get('elapsed_sec', 0.0)}s\n"
             f"📡 已发布TF到 /tf 话题"
         )
 
     def ensure_models_ready():
-        """Ensure SAM3, FlowPose, ROS2 and Siglip are initialized."""
+        """Ensure SAM3, FlowPose and ROS2 are initialized."""
         if state_dict["sam3_segmenter"] is not None and state_dict["flowpose_estimator"] is not None:
             return "✅ 模型已就绪"
         return init_models()
 
     def _capture_segment_pose_impl(prompts_text, suppress_contained_masks=None):
-        """Capture one RealSense frame, run SAM3 semantic segmentation, FlowPose, and publish TF."""
+        """Capture one ROS2 front frame, run SAM3, FlowPose, and publish TF."""
         global _ros2_node
 
         try:
@@ -2699,9 +2899,9 @@ def create_gradio_interface():
         suppress_contained_masks = state_dict["suppress_contained_masks"] if suppress_contained_masks is None else bool(suppress_contained_masks)
 
         try:
-            color_image, depth_image, depth_scale = capture_realsense_frame()
+            color_image, depth_image, depth_scale = capture_ros2_frame()
         except Exception as e:
-            return None, f"{init_msg}\n❌ RealSense捕获失败: {e}"
+            return None, f"{init_msg}\n❌ ROS2 front相机捕获失败: {e}"
 
         if _ros2_node is not None:
             _ros2_node.clear_object_tf_cache()
@@ -2728,7 +2928,7 @@ def create_gradio_interface():
             )
         except Exception as e:
             rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-            return rgb_image, f"{init_msg}\n✅ 已捕获RealSense图像\n❌ SAM3分割失败: {e}"
+            return rgb_image, f"{init_msg}\n✅ 已捕获ROS2 front图像\n❌ SAM3分割失败: {e}"
 
         state_dict["masks"] = masks if masks else None
         state_dict["labels"] = labels if labels else None
@@ -2750,7 +2950,7 @@ def create_gradio_interface():
             return (
                 rgb_image,
                 f"{init_msg}\n"
-                f"✅ 已捕获RealSense图像 (depth_scale={depth_scale:.6f})\n"
+                f"✅ 已捕获ROS2 front图像 (depth_scale={depth_scale:.6f})\n"
                 f"⚠️ SAM3未检测到目标: {', '.join(prompts)}\n"
                 f"耗时: {timing_text}"
             )
@@ -2775,24 +2975,44 @@ def create_gradio_interface():
             vis_rgb = cv2.cvtColor(mask_vis, cv2.COLOR_BGR2RGB)
             return vis_rgb, f"{init_msg}\n✅ SAM3完成: detections={len(detections)}\n❌ FlowPose姿态估计失败: {e}"
 
-        pose_all = flowpose_result.get("pose_all")
-        length_all = flowpose_result.get("length_all")
-        objects = flowpose_result.get("objects", [])
+        all_pose = flowpose_result.get("pose_all")
+        all_length = flowpose_result.get("length_all")
+        all_objects = flowpose_result.get("objects", [])
+        area_result = _filter_flowpose_by_work_area(
+            all_pose,
+            all_length,
+            labels,
+            all_objects,
+        )
+        pose_all = area_result["pose_all"]
+        length_all = area_result["length_all"]
+        filtered_labels = area_result["labels"]
+        objects = area_result["objects"]
+
+        flowpose_result["pose_all"] = pose_all
+        flowpose_result["length_all"] = length_all
+        flowpose_result["objects"] = objects
+        flowpose_result["work_area"] = area_result
         state_dict["pose_results"] = pose_all
         state_dict["length_results"] = length_all
+        state_dict["labels"] = filtered_labels
+        state_dict["all_labels"] = list(filtered_labels)
         state_dict["data_results"] = flowpose_result
 
         if pose_all is not None and _ros2_node is not None:
-            all_final_pose = np.asarray(pose_all, dtype=np.float32)
-            _ros2_node.publish_poses_as_tf(all_final_pose, labels)
+            _ros2_node.publish_poses_as_tf(
+                np.asarray(pose_all, dtype=np.float32),
+                filtered_labels,
+            )
 
         vis = visualize_mask_pose_results(
             color_image,
             masks,
             labels,
-            pose_all,
-            length_all,
+            all_pose,
+            all_length,
             state_dict["flowpose_estimator"],
+            work_area_statuses=area_result["statuses"],
         )
         vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
         timing_text = ", ".join(
@@ -2801,11 +3021,13 @@ def create_gradio_interface():
         return (
             vis_rgb,
             f"{init_msg}\n"
-            f"✅ 已捕获RealSense图像 (depth_scale={depth_scale:.6f})\n"
+            f"✅ 已捕获ROS2 front图像 (depth_scale={depth_scale:.6f})\n"
             f"✅ SAM3完成: prompts={len(prompts)}, detections={len(detections)}, labels={', '.join(labels)}\n"
             f"🧺 包含过滤: {'开启' if suppress_contained_masks else '关闭'}, "
             f"suppressed_contained={segment_stats.get('suppressed_contained', 0)}\n"
-            f"✅ FlowPose完成: objects={len(objects)}, elapsed={flowpose_result.get('elapsed_sec', 0.0)}s\n"
+            f"✅ FlowPose完成: objects={len(objects)}, "
+            f"out_of_area={area_result['out_of_area_count']}, "
+            f"elapsed={flowpose_result.get('elapsed_sec', 0.0)}s\n"
             f"📡 已发布并保活目标TF到 /tf\n"
             f"SAM3耗时: {timing_text}"
         )
@@ -2818,6 +3040,12 @@ def create_gradio_interface():
     def capture_segment_pose_default(suppress_contained_masks):
         image, _status = capture_segment_pose(DEFAULT_SAM3_PROMPTS, suppress_contained_masks)
         return image
+
+    def latest_task_loop_updates():
+        with state_dict["ui_lock"]:
+            image = state_dict.get("latest_task_loop_image")
+            status = state_dict.get("task_loop_ui_status") or _format_marvin_action_status()
+        return (gr.update() if image is None else image), status
 
     def _fresh_tf_prompts_text(target=None):
         configured = os.getenv("FRESH_TF_PROMPTS", "").strip()
@@ -2856,53 +3084,274 @@ def create_gradio_interface():
 
     # ==================== Marvin Action Execution Functions ====================
 
-    def refresh_marvin_status():
-        """刷新Marvin动作端状态。"""
-        return _format_marvin_action_status()
+    def _task_prompts_text(task_yaml_path):
+        steps = _load_task_yaml_steps(task_yaml_path)
+        prompts = []
+        for step in steps:
+            for target in step.target_names():
+                if normalize_obj_name(target) == "home":
+                    continue
+                text = str(target).strip().replace("_", " ")
+                if text and text not in prompts:
+                    prompts.append(text)
+        return ", ".join(prompts) if prompts else DEFAULT_SAM3_PROMPTS
 
-    def start_marvin_actions(
-        object_yaml_path,
-        status_json_path,
-        status_topic,
-        progress_topic,
-        object_tf_topic,
-        base_frame,
-    ):
-        """启动MarvinDocker/robotaction动作端。"""
+    def _task_loop_worker(task_yaml_path):
+        max_iterations = int(os.getenv("TASK_LOOP_MAX_ITERATIONS", "100"))
+        empty_confirmations = max(
+            1,
+            int(os.getenv("TASK_LOOP_EMPTY_CONFIRMATIONS", "3")),
+        )
+        consecutive_empty = 0
+        task_steps = _load_task_yaml_steps(task_yaml_path)
+        first_step = task_steps[0] if task_steps else None
+        target_norms = {
+            normalize_obj_name(target)
+            for target in (first_step.target_names() if first_step is not None else [])
+        }
+        prompts_text = _task_prompts_text(task_yaml_path)
+        suppress_contained = state_dict["suppress_contained_masks"]
+        for iteration in range(1, max_iterations + 1):
+            if _task_loop_stop_event.is_set():
+                print("[TaskLoop] stop requested")
+                break
+
+            latest_frames = set()
+            if _ros2_node is not None:
+                getter = getattr(_ros2_node, "current_object_child_frames", None)
+                if callable(getter):
+                    latest_frames = set(getter())
+            manual_has_task_target = any(
+                normalize_obj_name(frame) in target_norms
+                for frame in latest_frames
+            )
+            use_manual_first_frame = (
+                iteration == 1
+                and state_dict.get("pose_results") is not None
+                and state_dict.get("labels")
+                and _ros2_node is not None
+                and getattr(_ros2_node, "latest_object_tf_cache", None) is not None
+                and manual_has_task_target
+            )
+            if use_manual_first_frame:
+                status_text = "✅ 使用手动捕获的上一帧FlowPose结果作为第1轮TF"
+                if _ros2_node is not None:
+                    with contextlib.suppress(Exception):
+                        _ros2_node.republish_latest_object_tfs()
+                    time.sleep(float(os.getenv("TASK_LOOP_MANUAL_TF_SETTLE_SEC", "0.2")))
+                print(f"[TaskLoop] perception iteration={iteration}: {status_text}")
+            else:
+                if iteration == 1 and latest_frames:
+                    debug_frames = ", ".join(
+                        f"{frame}->{normalize_obj_name(frame)}"
+                        for frame in sorted(latest_frames)
+                    )
+                    print(
+                        "[TaskLoop] manual frame has no task target; recapturing. "
+                        f"available={debug_frames}, targets={sorted(target_norms)}"
+                    )
+                with state_dict["perception_lock"]:
+                    image, status = _capture_segment_pose_impl(prompts_text, suppress_contained)
+                status_text = str(status or "")
+                with state_dict["ui_lock"]:
+                    state_dict["latest_task_loop_image"] = image
+                    state_dict["latest_task_loop_status"] = status_text
+                    state_dict["latest_task_loop_iteration"] = iteration
+                print(f"[TaskLoop] perception iteration={iteration}: {status_text}")
+                if "✅ FlowPose完成" not in status_text:
+                    consecutive_empty += 1
+                    print(
+                        f"[TaskLoop] no FlowPose result: "
+                        f"{consecutive_empty}/{empty_confirmations}"
+                    )
+                    if consecutive_empty >= empty_confirmations:
+                        print(
+                            "[TaskLoop] no target confirmed in consecutive frames; "
+                            "stop loop"
+                        )
+                        break
+                    continue
+
+            node = _robotaction_node
+            if node is None:
+                print("[TaskLoop] action node stopped")
+                break
+
+            inst = node.select_target_instance()
+            if not inst:
+                consecutive_empty += 1
+                print(
+                    f"[TaskLoop] no remaining task target detected: "
+                    f"{consecutive_empty}/{empty_confirmations}"
+                )
+                if consecutive_empty >= empty_confirmations:
+                    print(
+                        "[TaskLoop] no target confirmed in consecutive frames; "
+                        "stop loop"
+                    )
+                    break
+                continue
+
+            consecutive_empty = 0
+            result = node.run_task_for_instance(inst)
+            print(f"[TaskLoop] selected={inst}, result={result}")
+            if result != TaskStatus.SUCCESS:
+                break
+
+            bag_path = _rosbag_manager.stop_recording()
+            _task_loop_continue_event.clear()
+            with state_dict["ui_lock"]:
+                state_dict["task_loop_waiting_continue"] = True
+                state_dict["task_loop_ui_status"] = (
+                    f"✅ 当前目标 {inst} 的任务流程已完成\n"
+                    f"💾 rosbag已保存: {bag_path or '<未生成>'}\n"
+                    "⏸️ 已暂停，可回放数据或点击“继续下一轮”"
+                )
+            print(
+                f"[TaskLoop] selected={inst} task sequence complete; "
+                "waiting for web continue"
+            )
+            while (
+                not _task_loop_stop_event.is_set()
+                and not _task_loop_continue_event.wait(timeout=0.2)
+            ):
+                pass
+            if _task_loop_stop_event.is_set():
+                print("[TaskLoop] stop requested while waiting for continue")
+                break
+            with state_dict["ui_lock"]:
+                state_dict["task_loop_waiting_continue"] = False
+                state_dict["task_loop_ui_status"] = (
+                    "▶️ 已继续，正在重新执行SAM3+FlowPose并查找下一个目标"
+                )
+            print("[TaskLoop] continue received; start next perception iteration")
+
+        _rosbag_manager.stop_recording()
+        if not _task_loop_stop_event.is_set():
+            node = _robotaction_node
+            if node is not None:
+                try:
+                    print("[TaskLoop] loop ended; publishing both arms home")
+                    node.publish_home_both()
+                    print("[TaskLoop] both arms home published")
+                except Exception as e:
+                    print(f"[TaskLoop] failed to publish both arms home: {e}")
+        print("[TaskLoop] loop finished")
+        with state_dict["ui_lock"]:
+            state_dict["task_loop_waiting_continue"] = False
+            state_dict["task_loop_ui_status"] = "✅ TaskLoop已结束"
+
+    def start_task_loop_actions_default():
+        """启动 task.yaml 驱动的循环动作端。"""
+        global _task_loop_thread
         try:
-            node, msg = start_marvin_action_node(
-                object_yaml_path=object_yaml_path,
-                status_json_path=status_json_path,
-                status_topic=status_topic,
-                progress_topic=progress_topic,
-                object_tf_topic=object_tf_topic,
-                base_frame=base_frame,
+            if _task_loop_thread is not None and _task_loop_thread.is_alive():
+                return "⚠️ TaskLoop已经在运行", _format_marvin_action_status()
+            ensure_models_ready()
+            node, msg = start_task_loop_node(
+                object_yaml_path=DEFAULT_MARVIN_OBJECT_YAML,
+                task_yaml_path=DEFAULT_MARVIN_TASK_YAML,
+                progress_topic=_default_marvin_config_value("progress_topic", "MARVIN_PROGRESS_TOPIC", "/control/task_percentage"),
+                object_tf_topic=_default_marvin_config_value("object_tf_topic", "MARVIN_OBJECT_TF_TOPIC", ""),
+                base_frame=_default_marvin_config_value("base_frame", "MARVIN_BASE_FRAME", "base_link"),
             )
             state_dict["marvin_action_node"] = node
-            return f"✅ {msg}\n{_format_marvin_action_status()}", _format_marvin_action_status()
+            _task_loop_stop_event.clear()
+            _task_loop_continue_event.clear()
+            with state_dict["ui_lock"]:
+                state_dict["task_loop_waiting_continue"] = False
+                state_dict["task_loop_ui_status"] = "▶️ TaskLoop运行中"
+            bag_path = _rosbag_manager.start_recording()
+            if _task_loop_thread is None or not _task_loop_thread.is_alive():
+                _task_loop_thread = threading.Thread(
+                    target=_task_loop_worker,
+                    args=(DEFAULT_MARVIN_TASK_YAML,),
+                    name="task-loop-worker",
+                    daemon=True,
+                )
+                _task_loop_thread.start()
+            return (
+                f"✅ {msg}\n🎥 rosbag录制中: {bag_path}\n{_format_marvin_action_status()}",
+                f"▶️ TaskLoop运行中\n🎥 rosbag录制中: {bag_path}",
+            )
         except Exception as e:
+            _rosbag_manager.stop_recording()
             state_dict["marvin_action_node"] = None
-            return f"❌ Marvin动作端启动失败: {e}", _format_marvin_action_status()
+            return f"❌ TaskLoop动作端启动失败: {e}", _format_marvin_action_status()
 
-    def start_marvin_actions_default():
-        return start_marvin_actions(
-            DEFAULT_MARVIN_OBJECT_YAML,
-            DEFAULT_MARVIN_STATUS_JSON,
-            _default_marvin_config_value("status_topic", "MARVIN_STATUS_TOPIC", "/siglip/result"),
-            _default_marvin_config_value("progress_topic", "MARVIN_PROGRESS_TOPIC", "/control/task_percentage"),
-            _default_marvin_config_value("object_tf_topic", "MARVIN_OBJECT_TF_TOPIC", ""),
-            _default_marvin_config_value("base_frame", "MARVIN_BASE_FRAME", "base_link"),
+    def continue_task_loop_actions():
+        if _task_loop_thread is None or not _task_loop_thread.is_alive():
+            return "⚠️ TaskLoop当前未运行", _format_marvin_action_status()
+        if _task_loop_stop_event.is_set():
+            return "⚠️ TaskLoop正在停止，无法继续", _format_marvin_action_status()
+        with state_dict["ui_lock"]:
+            waiting_continue = bool(state_dict.get("task_loop_waiting_continue"))
+        if not waiting_continue:
+            return (
+                "⚠️ 当前任务尚未完成，无需继续",
+                "▶️ TaskLoop正在执行当前目标的任务流程",
+            )
+        try:
+            bag_path = _rosbag_manager.start_recording()
+        except Exception as e:
+            return f"❌ 无法开始下一轮rosbag录制: {e}", state_dict["task_loop_ui_status"]
+        _task_loop_continue_event.set()
+        with state_dict["ui_lock"]:
+            state_dict["task_loop_ui_status"] = (
+                f"▶️ 已发送继续指令\n🎥 rosbag录制中: {bag_path}"
+            )
+        return (
+            f"✅ 已继续下一轮\n🎥 rosbag录制中: {bag_path}",
+            f"▶️ 已发送继续指令\n🎥 rosbag录制中: {bag_path}",
         )
 
+    def play_latest_rosbag():
+        with state_dict["ui_lock"]:
+            waiting_continue = bool(state_dict.get("task_loop_waiting_continue"))
+        if not waiting_continue:
+            return (
+                "⚠️ 仅可在每轮任务完成后的暂停状态回放",
+                state_dict["task_loop_ui_status"],
+            )
+        try:
+            bag_path = _rosbag_manager.play_latest()
+            return (
+                f"▶️ 开始回放rosbag: {bag_path}",
+                f"▶️ 正在回放上一轮数据\n{bag_path}",
+            )
+        except Exception as e:
+            return f"❌ rosbag回放失败: {e}", state_dict["task_loop_ui_status"]
+
+    def delete_latest_rosbag():
+        with state_dict["ui_lock"]:
+            waiting_continue = bool(state_dict.get("task_loop_waiting_continue"))
+        if not waiting_continue:
+            return (
+                "⚠️ 仅可在每轮任务完成后的暂停状态删除",
+                state_dict["task_loop_ui_status"],
+            )
+        try:
+            bag_path = _rosbag_manager.delete_latest()
+            status = (
+                f"🗑️ 已删除上一轮rosbag\n{bag_path}\n"
+                "⏸️ 仍处于暂停状态，可点击“继续下一轮”"
+            )
+            with state_dict["ui_lock"]:
+                state_dict["task_loop_ui_status"] = status
+            return f"✅ 已删除rosbag: {bag_path}", status
+        except Exception as e:
+            return f"❌ rosbag删除失败: {e}", state_dict["task_loop_ui_status"]
+
     def stop_marvin_actions():
-        """停止Marvin动作端，不额外发布home。"""
-        stopped = stop_marvin_action_node(publish_home=False)
+        """停止 task loop，不额外发布home。"""
+        stop_task_loop(publish_home=False)
+        _rosbag_manager.stop_recording()
+        stopped = stop_marvin_action_node(publish_home=False, destroy=True)
         state_dict["marvin_action_node"] = _robotaction_node
-        paused = bool(_robotaction_node is not None and getattr(_robotaction_node, "_fresh_tf_paused", False))
-        if paused:
-            msg = "✅ Marvin动作端已暂停"
-        else:
-            msg = "✅ Marvin动作端已停止" if stopped else "⚠️ Marvin动作端未运行"
+        with state_dict["ui_lock"]:
+            state_dict["task_loop_waiting_continue"] = False
+            state_dict["task_loop_ui_status"] = "TaskLoop动作端已停止"
+        msg = "✅ TaskLoop动作端已停止" if stopped else "⚠️ TaskLoop动作端未运行"
         return msg, _format_marvin_action_status()
 
     def marvin_home_both():
@@ -2919,20 +3368,6 @@ def create_gradio_interface():
         except Exception as e:
             return f"❌ Home发布失败: {e}", _format_marvin_action_status()
 
-    def clear_inference_cache():
-        """清理一次推理缓存并释放显存。"""
-        state_dict["pose_results"] = None
-        state_dict["length_results"] = None
-        state_dict["data_results"] = None
-        try:
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"clear cache warn: {e}")
-        return "🧹 已清理推理缓存", _format_marvin_action_status()
-
     try:
         initial_model_status = init_models()
     except Exception as e:
@@ -2941,9 +3376,13 @@ def create_gradio_interface():
 
     # ==================== Gradio Interface ====================
 
-    with gr.Blocks(title="SAM3 + FlowPose 6D姿态估计 + 动作执行") as demo:
-        gr.Markdown("# 🎯 SAM3 + FlowPose 6D姿态估计 + 动作执行系统")
-        gr.Markdown("### 步骤: 1️⃣ 程序自动初始化 → 2️⃣ 捕获RealSense并完成SAM3+FlowPose → 3️⃣ Marvin动作端执行")
+    with gr.Blocks(title="SAM3 + FlowPose Task Loop") as demo:
+        gr.Markdown("# 🎯 SAM3 + FlowPose Task Loop")
+        gr.Markdown("### 步骤: 1️⃣ 程序自动初始化 → 2️⃣ 捕获ROS2 front相机并完成SAM3+FlowPose → 3️⃣ 按 task.yaml 循环执行")
+        task_loop_image_timer = gr.Timer(
+            value=float(os.getenv("TASK_LOOP_UI_REFRESH_SEC", "0.5")),
+            active=True,
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -2961,26 +3400,27 @@ def create_gradio_interface():
 
         # ==================== Action Execution Section ====================
         gr.Markdown("---")
-        gr.Markdown("## 🤖 6. Marvin动作端")
-        gr.Markdown("💡 **流程**: /siglip/result 稳定状态 → graph_info.next_action → FlowPose TF → Marvin动作模板 → /fusion_pose")
+        gr.Markdown("## 🤖 TaskLoop动作端")
+        gr.Markdown("💡 **流程**: SAM3+FlowPose 当前目标列表 → task.yaml 顺序动作 → /fusion_pose → 下一轮感知")
 
         with gr.Row():
             with gr.Column(scale=1):
                 gr.Markdown("### 运行状态")
                 current_task_display = gr.Textbox(
-                    label="Marvin状态",
-                    value="Marvin动作端未启动",
+                    label="TaskLoop状态",
+                    value="TaskLoop动作端未启动",
                     interactive=False,
                     lines=8,
                 )
                 action_log = gr.Textbox(label="动作日志", interactive=False, lines=8)
 
         with gr.Row():
-            start_marvin_btn = gr.Button("▶️ 启动Marvin动作端", variant="primary", size="lg")
-            refresh_marvin_btn = gr.Button("🔄 刷新状态", variant="secondary", size="lg")
+            start_marvin_btn = gr.Button("▶️ 启动TaskLoop动作端", variant="primary", size="lg")
+            continue_task_btn = gr.Button("⏭️ 继续下一轮", variant="secondary", size="lg")
+            play_rosbag_btn = gr.Button("⏯️ 回放上一轮", variant="secondary", size="lg")
+            delete_rosbag_btn = gr.Button("🗑️ 删除上一轮", variant="stop", size="lg")
             home_btn = gr.Button("🏠 Home", variant="secondary", size="lg")
             stop_btn = gr.Button("🛑 停止Marvin", variant="stop", size="lg")
-            clear_btn = gr.Button("🧹 清理缓存", variant="secondary", size="md")
 
         # ==================== 事件绑定 ====================
         perception_btn.click(
@@ -2988,17 +3428,35 @@ def create_gradio_interface():
             inputs=[suppress_contained_input],
             outputs=[perception_output],
         )
+        task_loop_image_timer.tick(
+            fn=latest_task_loop_updates,
+            inputs=[],
+            outputs=[perception_output, current_task_display],
+        )
 
         # Marvin action bindings
         start_marvin_btn.click(
-            fn=start_marvin_actions_default,
+            fn=start_task_loop_actions_default,
             inputs=[],
             outputs=[action_log, current_task_display],
         )
-        refresh_marvin_btn.click(fn=refresh_marvin_status, outputs=current_task_display)
+        continue_task_btn.click(
+            fn=continue_task_loop_actions,
+            inputs=[],
+            outputs=[action_log, current_task_display],
+        )
+        play_rosbag_btn.click(
+            fn=play_latest_rosbag,
+            inputs=[],
+            outputs=[action_log, current_task_display],
+        )
+        delete_rosbag_btn.click(
+            fn=delete_latest_rosbag,
+            inputs=[],
+            outputs=[action_log, current_task_display],
+        )
         home_btn.click(fn=marvin_home_both, outputs=[action_log, current_task_display])
         stop_btn.click(fn=stop_marvin_actions, outputs=[action_log, current_task_display])
-        clear_btn.click(fn=clear_inference_cache, outputs=[action_log, current_task_display])
 
     return demo
 
@@ -3007,11 +3465,13 @@ def main():
     try:
         # Initialize ROS2 at startup
         init_ros2()
-        print("ROS2 initialized. RealSense capture uses pyrealsense2 directly.")
+        print("ROS2 initialized. RGB-D capture uses subscribed front camera topics.")
 
         demo = create_gradio_interface()
         demo.launch()
     finally:
+        if _rosbag_manager is not None:
+            _rosbag_manager.shutdown()
         shutdown_ros2()
 
 

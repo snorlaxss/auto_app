@@ -198,7 +198,7 @@ class FlowPoseServer:
             ema_rate=0.999,
             repeat_num=20,
             clustering=1,
-            clustering_eps=0.05,
+            clustering_eps=0.01,
             clustering_minpts=0.1667,
         )
 
@@ -275,11 +275,21 @@ class FlowPoseServer:
                 if valid_output:
                     all_final_pose = np.asarray(pose_all, dtype=np.float32)
                     all_final_length = np.asarray(length_all, dtype=np.float32)
+                    raw_pose = getattr(self.inferencer, "last_raw_pose", None)
+                    bbox_pose = None
+                    if raw_pose is not None:
+                        try:
+                            if hasattr(raw_pose, "detach"):
+                                raw_pose = raw_pose.detach().cpu().numpy()
+                            bbox_pose = np.asarray(raw_pose, dtype=np.float32)
+                            if bbox_pose.shape[0] != all_final_pose.shape[0]:
+                                bbox_pose = None
+                        except Exception:
+                            bbox_pose = None
 
                     data = SimpleNamespace()
                     data.cam_intrinsics = self.build_cam_intrinsics()
 
-                    # 如果你底层的 visualize_detections 支持传入 axis_len，你可以加进去
                     vis = self.visualize_detections(
                         vis,
                         all_final_pose,
@@ -288,6 +298,7 @@ class FlowPoseServer:
                         color=(0, 255, 0),
                         thickness=2,
                         axes_length=self.axis_len,
+                        bbox_poses=bbox_pose,
                     )
 
                 if request_id:

@@ -5,7 +5,7 @@
       "state_description": "tools all in table or exist tool in table",
       "next_action":  [
         { 
-          "targets": ["saw", "knife", "yellow_screw", "grey_screw", "pliers", "graver", "control"],
+          "targets": ["saw", "knife", "yellow_screwdriver", "grey_screwdriver", "pliers", "graver", "control", "black_screwdriver", "red_screwdriver", "black_iron"],
           "action_name": "pick",
           "arm": "correct",
           "speed": 1.0,
@@ -20,8 +20,8 @@
       "state_description": "tool in hand",
       "next_action":  [
         { 
-          "target": "basket",
-          "action_name": "place",
+          "target": "home",
+          "action_name": "location",
           "arm": "copy last one",
           "speed": 1.0,
           "correction_mode": "forward"

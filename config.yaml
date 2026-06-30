@@ -6,7 +6,7 @@ sam3:
   containment_threshold: 0.85
   bbox_containment_threshold: 0.85
   containment_min_area_ratio: 1.2
-  prompts: basket, control, grey screwdriver, yellow screwdriver, saw, knife, pliers, graver
+  prompts: control, grey screwdriver, yellow screwdriver, saw, knife, pliers, graver, black screwdriver, red screwdriver, blue object
 
 flowpose:
   paths:
@@ -21,12 +21,13 @@ flowpose:
     cy: 257.6228332519531
     axis_len: 0.035
     width: 640
-    height: 480
+    height: 480 
 
-siglip:
+siglip:   
   model:
-    checkpoint: SiglipDocker/model/task_tool/lastvit_clip_output_v4_t1_fp16/model_lastvit_clip_fp16.pt
-    graph_info_file: SiglipDocker/model/task_tool/lastvit_clip_output_v4_t1_fp16/classification_viz/graph_info_epochfp16.json
+    path: SiglipDocker/model/siglip2-so400m-patch14-224
+    checkpoint: SiglipDocker/model/graspanything/model_siglip2_best_eval.pt
+    graph_info_file: SiglipDocker/model/graspanything/graph_info_best_eval.json
   inference:
     topk: 5
     image_size: 224
@@ -50,7 +51,44 @@ realsense:
   width: 640
   height: 480
   fps: 30
+  cameras:
+    front:
+      camera_name: camera_head
+      camera_namespace: camera_head
+      serial_no: _347622076256
+      rgb_camera.color_profile: 640x480x30
+      depth_module.depth_profile: 640x480x30
+    head:
+      camera_name: camera_head
+      camera_namespace: camera_head
+      serial_no: _347622076256
+      rgb_camera.color_profile: 640x480x30
+      depth_module.depth_profile: 640x480x30
+    left:
+      camera_name: camera_left_wrist
+      camera_namespace: camera_left_wrist
+      serial_no: _427622273358
+      rgb_camera.color_profile: 640x480x30
+      depth_module.color_profile: 640x480x30
+      depth_module.depth_profile: 640x480x30
+    right:
+      camera_name: camera_right_wrist
+      camera_namespace: camera_right_wrist
+      serial_no: _427622271647
+      rgb_camera.color_profile: 640x480x30
+      depth_module.color_profile: 640x480x30
+      depth_module.depth_profile: 640x480x30
 
 fresh_tf:
   min_interval_sec: 1.0
   settle_sec: 0.15
+  perception_camera: front
+work_area:
+  x_max: 0.7
+  x_min: 0.35
+  y_max: 0.25
+  y_min: -0.25
+
+rosbag:
+  save_path: /home/snorlax/work/auto_app/ros2data
+  stop_timeout_sec: 10.0

@@ -117,7 +117,11 @@ class FusionExecutionMixin:
             return None
 
         translation = ts.transform.translation
-        arm = self.arm_resolver.resolve(step.arm, translation)
+        arm = self.arm_resolver.resolve(
+            step.arm,
+            translation,
+            ts.transform.rotation,
+        )
         self.last_arm = arm
 
         template_target = step.template_target_for_instance(inst)
@@ -213,7 +217,7 @@ class FusionExecutionMixin:
                     return TaskStatus.PREEMPT, preempt_state
 
             if self.task_progress_watcher.is_finished(
-                silence_after_zero=0.05,
+                silence_after_zero=0.3,
                 finish_percentage=0.99,
             ):
                 self.get_logger().info(f"[Home] 检测到 home 完成 arm='{arm}'")

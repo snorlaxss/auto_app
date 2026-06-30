@@ -9,6 +9,11 @@ server:
 sam3:
   checkpoint_path: /workspace/model/sam3.pt
   score_threshold: 0.4
+  dedup_iou_threshold: 0.55
+  suppress_contained_masks: true
+  containment_threshold: 0.85
+  bbox_containment_threshold: 0.85
+  containment_min_area_ratio: 1.2
 
 efficient_sam3:
   checkpoint_path: "/workspace/model/put your checkpoint name here, e.g., efficient_sam3_image_encoder_mobileclip_s0_ctx16.pt"
