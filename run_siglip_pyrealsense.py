@@ -1950,6 +1950,18 @@ def _parse_step_verification(task):
         "expected": expected,
         "timeout": max(0.1, float(verify.get("timeout", 3.0))),
         "stable_frames": max(1, int(verify.get("stable_frames", 5))),
+        "delay_before": max(
+            0.0,
+            float(
+                verify.get(
+                    "delay_before",
+                    verify.get(
+                        "delay_before_sec",
+                        os.getenv("TASK_SIGLIP_VERIFY_DELAY_SEC", "0"),
+                    ),
+                )
+            ),
+        ),
         "on_failure": str(verify.get("on_failure", "home")).strip().lower(),
         "arm": _parse_verify_arm_value(verify.get("arm", "copy last one")),
     }
@@ -2040,6 +2052,18 @@ def _load_task_yaml_steps(task_yaml_path):
             status_timeout=float(task.get("status_timeout", 2.0)),
             task_finish_timeout=float(task.get("task_finish_timeout", 60.0)),
             policy=str(task.get("policy", "first")).strip().lower() or "first",
+        )
+        step.min_action_duration = max(
+            0.0,
+            float(
+                task.get(
+                    "min_action_duration",
+                    task.get(
+                        "min_action_duration_sec",
+                        os.getenv("TASK_LOOP_MIN_ACTION_DURATION_SEC", "0"),
+                    ),
+                )
+            ),
         )
         step.verification = _parse_step_verification(task)
         steps.append(step)
@@ -2306,7 +2330,9 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
     def _wait_step_finished(self, step: Step):
         start = time.time()
         finish_percentage = 1.0
+        min_action_duration = max(0.0, float(getattr(step, "min_action_duration", 0.0) or 0.0))
         observed_new_cycle = False
+        early_finish_logged = False
         while rclpy.ok() and not _task_loop_stop_event.is_set():
             watcher = self.task_progress_watcher
             with watcher._lock:
@@ -2323,13 +2349,22 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
             ):
                 observed_new_cycle = True
 
-            if observed_new_cycle and watcher.is_finished(
+            elapsed = time.time() - start
+            finish_seen = observed_new_cycle and watcher.is_finished(
                 silence_after_zero=0.5,
                 finish_percentage=finish_percentage,
-            ):
+            )
+            if finish_seen and elapsed >= min_action_duration:
                 self.get_logger().info("[TaskLoop] 当前动作完成")
                 return TaskStatus.SUCCESS
-            if (time.time() - start) >= step.task_finish_timeout:
+            if finish_seen and not early_finish_logged:
+                early_finish_logged = True
+                self.get_logger().info(
+                    f"[TaskLoop] progress reported complete after {elapsed:.2f}s; "
+                    f"waiting until min_action_duration={min_action_duration:.2f}s "
+                    f"before verification"
+                )
+            if elapsed >= step.task_finish_timeout:
                 self.get_logger().warning(
                     f"[TaskLoop] 等待动作完成超时 action='{step.action_name}', "
                     f"observed_new_cycle={observed_new_cycle}, latest={latest_value}"
@@ -2364,6 +2399,7 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
         expected = verification["expected"]
         timeout = verification["timeout"]
         stable_frames = verification["stable_frames"]
+        delay_before = max(0.0, float(verification.get("delay_before", 0.0) or 0.0))
         arms = self._resolve_verify_arms(verification)
         camera_arms = self._siglip_watchers_for_arms(arms)
         arm_desc = ",".join(camera_arms)
@@ -2371,6 +2407,15 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
             f"[TaskSiglip] running on-demand inference expected='{expected}', camera='{arm_desc}', "
             f"stable_frames={stable_frames}, timeout={timeout:.1f}s"
         )
+        if delay_before > 0:
+            self.get_logger().info(
+                f"[TaskSiglip] waiting {delay_before:.2f}s before verification"
+            )
+            deadline = time.time() + delay_before
+            while time.time() < deadline and not _task_loop_stop_event.is_set():
+                remaining = max(0.0, deadline - time.time())
+                time.sleep(min(0.05, remaining))
+
         latest_actual = None
         for camera_arm in camera_arms:
             try:

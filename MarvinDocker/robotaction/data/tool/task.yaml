@@ -1,5 +1,5 @@
 tasks:
-  - target: "[saw, knife, yellow_screwdriver, grey_screwdriver, pliers, graver, control, black_screwdriver, red_screwdriver, pen]"
+  - target: "[saw, knife, yellow_screwdriver, grey_screwdriver, pliers, graver, control, black_screwdriver, red_screwdriver, pen, toy, car]"
     action_name: "pick"
     arm: "correct"
     speed: 1.0  

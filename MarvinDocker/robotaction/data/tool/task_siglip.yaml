@@ -1,14 +1,16 @@
 tasks:
-  - target: "[saw, knife, yellow_screwdriver, grey_screwdriver, pliers, graver, control, black_screwdriver, red_screwdriver, test tube, green plastic, pen]"
+  - target: "[saw, knife, yellow_screwdriver, grey_screwdriver, pliers, graver, control, black_screwdriver, red_screwdriver, test tube, green plastic, pen, toy,car]"
     action_name: "pick"
     arm: "correct"
-    speed: 1.0  
+    speed: 0.8 
+    min_action_duration: 2.0
     correction_mode: "reverse"
     verify:
       source: "siglip"
       expected: "Grasping"
       timeout: 3.0
       stable_frames: 2
+      delay_before: 0.8
       on_failure: "home"
       arm: "copy last one"
   - target: "home"
