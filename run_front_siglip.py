@@ -24,7 +24,7 @@ AUTO_APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if AUTO_APP_DIR not in sys.path:
     sys.path.insert(0, AUTO_APP_DIR)
 
-import run_nosiglip_pyrealsense as core
+import run_siglip_pyrealsense as core
 
 try:
     from sensor_msgs.msg import JointState
@@ -199,6 +199,7 @@ class RobotTaskApiService:
             "perception_lock": threading.RLock(),
             "sam3_segmenter": None,
             "flowpose_estimator": None,
+            "siglip_estimator": None,
             "model_device": None,
             "suppress_contained_masks": _env_bool("SAM3_SUPPRESS_CONTAINED_MASKS", True),
             "last_capture": None,
@@ -217,10 +218,12 @@ class RobotTaskApiService:
         self._ensure_joint_monitor()
         if _env_bool("API_INIT_MODELS", True):
             self.ensure_models_ready()
+        core.set_fresh_tf_callback(self.fresh_tf_capture)
 
     def shutdown(self):
         self.worker_stop.set()
         core._task_loop_stop_event.set()
+        core.set_fresh_tf_callback(None)
         if self.worker_thread is not None and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=1.0)
         with contextlib.suppress(Exception):
@@ -240,13 +243,19 @@ class RobotTaskApiService:
             core._ros2_executor.add_node(self.joint_monitor)
 
     def ensure_models_ready(self):
-        if self.state["sam3_segmenter"] is not None and self.state["flowpose_estimator"] is not None:
+        if (
+            self.state["sam3_segmenter"] is not None
+            and self.state["flowpose_estimator"] is not None
+            and self.state["siglip_estimator"] is not None
+        ):
             return
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if self.state["sam3_segmenter"] is None:
             self.state["sam3_segmenter"] = core.initialize_sam3(device)
         if self.state["flowpose_estimator"] is None:
             self.state["flowpose_estimator"] = core.FlowPoseEstimator(device)
+        if self.state["siglip_estimator"] is None:
+            self.state["siglip_estimator"] = core._get_task_siglip_estimator(device)
         self.state["model_device"] = str(device)
 
     def _task_prompts_text(self):
@@ -262,6 +271,39 @@ class RobotTaskApiService:
                 if text and text != "home" and text not in prompts:
                     prompts.append(text)
         return ", ".join(prompts) if prompts else self.default_sam3_prompts
+
+    def _fresh_tf_prompts_text(self, target=None):
+        configured = os.getenv("FRESH_TF_PROMPTS", "").strip()
+        if configured:
+            return configured
+
+        mode = os.getenv("FRESH_TF_PROMPT_MODE", "default").strip().lower()
+        if mode == "target" and target:
+            values = target if isinstance(target, (list, tuple, set)) else [target]
+            prompts = []
+            for value in values:
+                text = _normalize_label(value)
+                if text and text != "home" and text not in prompts:
+                    prompts.append(text)
+            if prompts:
+                return ", ".join(prompts)
+
+        return self._task_prompts_text()
+
+    def fresh_tf_capture(self, reason="", target=None):
+        prompts_text = self._fresh_tf_prompts_text(target)
+        suppress_contained = _env_bool(
+            "FRESH_TF_SUPPRESS_CONTAINED_MASKS",
+            self.state["suppress_contained_masks"],
+        )
+        capture = self.capture_perception(prompts_text, suppress_contained)
+        status = str(capture.get("status", ""))
+        labels = capture.get("labels", []) or []
+        message = (
+            f"reason={reason}, status={status}, labels={labels}, "
+            f"message={capture.get('message', '')}"
+        )
+        return status == "ok", message
 
     def capture_perception(self, prompts_text=None, suppress_contained_masks=None):
         with self.state["perception_lock"]:
@@ -330,20 +372,50 @@ class RobotTaskApiService:
         except Exception as exc:
             raise ApiError(2001, f"FlowPose姿态估计失败: {exc}", 500)
 
-        pose_all = flowpose_result.get("pose_all")
-        length_all = flowpose_result.get("length_all")
+        all_pose = flowpose_result.get("pose_all")
+        all_length = flowpose_result.get("length_all")
+        all_objects = flowpose_result.get("objects", [])
+        area_result = core._filter_flowpose_by_work_area(
+            all_pose,
+            all_length,
+            labels,
+            all_objects,
+        )
+        pose_all = area_result["pose_all"]
+        length_all = area_result["length_all"]
+        filtered_labels = area_result["labels"]
+        objects = area_result["objects"]
+
+        flowpose_result["pose_all"] = pose_all
+        flowpose_result["length_all"] = length_all
+        flowpose_result["objects"] = objects
+        flowpose_result["work_area"] = area_result
         if pose_all is not None and core._ros2_node is not None:
-            core._ros2_node.publish_poses_as_tf(np.asarray(pose_all, dtype=np.float32), labels)
+            core._ros2_node.publish_poses_as_tf(
+                np.asarray(pose_all, dtype=np.float32),
+                filtered_labels,
+            )
 
         vis = core.visualize_mask_pose_results(
-            color_image, masks, labels, pose_all, length_all, self.state["flowpose_estimator"]
+            color_image,
+            masks,
+            labels,
+            all_pose,
+            all_length,
+            self.state["flowpose_estimator"],
+            work_area_statuses=area_result["statuses"],
         )
         result.update({
             "image_rgb": cv2.cvtColor(vis, cv2.COLOR_BGR2RGB),
-            "objects": flowpose_result.get("objects", []),
+            "labels": filtered_labels,
+            "objects": objects,
             "status": "ok",
-            "message": "success",
+            "message": (
+                f"success; objects={len(objects)}, "
+                f"out_of_area={area_result['out_of_area_count']}"
+            ),
             "flowpose": flowpose_result,
+            "work_area": area_result,
         })
         self._save_perception_state(result, pose_all, flowpose_result)
         return result
@@ -446,7 +518,16 @@ class RobotTaskApiService:
 
     def _task_loop_worker(self, operation_id):
         prompts_text = self._task_prompts_text()
-        max_iterations = int(os.getenv("TASK_LOOP_MAX_ITERATIONS", "50"))
+        max_iterations = int(os.getenv("TASK_LOOP_MAX_ITERATIONS", "100"))
+        empty_confirmations = max(
+            1,
+            int(os.getenv("TASK_LOOP_EMPTY_CONFIRMATIONS", "3")),
+        )
+        empty_retry_interval = max(
+            0.0,
+            float(os.getenv("TASK_LOOP_EMPTY_RETRY_INTERVAL_SEC", "0.5")),
+        )
+        consecutive_empty = 0
         suppress_contained = _env_bool("TASK_LOOP_SUPPRESS_CONTAINED_MASKS", self.state["suppress_contained_masks"])
         try:
             for iteration in range(1, max_iterations + 1):
@@ -466,6 +547,25 @@ class RobotTaskApiService:
                         f"[TaskLoopAPI] perception iteration={iteration}: "
                         f"status={cap.get('status')} labels={cap.get('labels', [])}"
                     )
+                    if cap.get("status") != "ok":
+                        consecutive_empty += 1
+                        print(
+                            f"[TaskLoopAPI] no FlowPose result: "
+                            f"{consecutive_empty}/{empty_confirmations}"
+                        )
+                        if consecutive_empty >= empty_confirmations:
+                            self._set_operation_done(
+                                operation_id,
+                                "completed",
+                                "success",
+                                final_reason="no_target_confirmed",
+                                iteration=iteration,
+                            )
+                            print("[TaskLoopAPI] no target confirmed; loop complete")
+                            return
+                        if empty_retry_interval > 0:
+                            self.worker_stop.wait(timeout=empty_retry_interval)
+                        continue
 
                 node = core._robotaction_node
                 if node is None:
@@ -473,16 +573,26 @@ class RobotTaskApiService:
 
                 inst = node.select_target_instance()
                 if not inst:
-                    self._set_operation_done(
-                        operation_id,
-                        "completed",
-                        "success",
-                        final_reason="no_remaining_task_target",
-                        iteration=iteration,
+                    consecutive_empty += 1
+                    print(
+                        f"[TaskLoopAPI] no remaining task target detected: "
+                        f"{consecutive_empty}/{empty_confirmations}"
                     )
-                    print("[TaskLoopAPI] no remaining task target detected; loop complete")
-                    return
+                    if consecutive_empty >= empty_confirmations:
+                        self._set_operation_done(
+                            operation_id,
+                            "completed",
+                            "success",
+                            final_reason="no_remaining_task_target",
+                            iteration=iteration,
+                        )
+                        print("[TaskLoopAPI] no remaining task target detected; loop complete")
+                        return
+                    if empty_retry_interval > 0:
+                        self.worker_stop.wait(timeout=empty_retry_interval)
+                    continue
 
+                consecutive_empty = 0
                 status = node.run_task_for_instance(inst)
                 if status != core.TaskStatus.SUCCESS:
                     if status == core.TaskStatus.STOP:
@@ -500,6 +610,30 @@ class RobotTaskApiService:
             self._set_operation_done(operation_id, "completed", "success", final_reason="max_iterations")
         except Exception as exc:
             self._set_operation_done(operation_id, "failed", str(exc))
+        finally:
+            siglip_failed = bool(
+                core._robotaction_node is not None
+                and getattr(core._robotaction_node, "siglip_verification_failed", False)
+            )
+            should_home = (
+                not self.worker_stop.is_set()
+                and not core._task_loop_stop_event.is_set()
+                and not siglip_failed
+            )
+            if should_home:
+                node = core._robotaction_node
+                if node is not None:
+                    try:
+                        print("[TaskLoopAPI] loop ended; publishing both arms home")
+                        node.publish_home_both()
+                        print("[TaskLoopAPI] both arms home published")
+                    except Exception as exc:
+                        print(f"[TaskLoopAPI] failed to publish both arms home: {exc}")
+            elif siglip_failed:
+                print(
+                    "[TaskLoopAPI] Siglip verification failed; current arm home "
+                    "already published, skip both-arms home"
+                )
 
     def start_grasp(self, request):
         if request.trajectory_mode not in {"linear", "arc"}:

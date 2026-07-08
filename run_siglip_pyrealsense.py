@@ -692,6 +692,73 @@ def _siglip_jsonable_result(result):
     return result
 
 
+class CrossViewAttentionPooler(torch.nn.Module):
+    """Siglip V2 pooler from SiglipDocker ZeroMQServerema."""
+
+    def __init__(self, embed_dim=1152, num_queries=8, num_heads=8,
+                 num_layers=2, dropout=0.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_queries = num_queries
+        self.query_tokens = torch.nn.Parameter(torch.zeros(1, num_queries, embed_dim))
+        self.layers = torch.nn.ModuleList()
+        for _ in range(num_layers):
+            self.layers.append(torch.nn.ModuleDict({
+                "cross_attn": torch.nn.MultiheadAttention(
+                    embed_dim=embed_dim,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                    batch_first=True,
+                ),
+                "norm1": torch.nn.LayerNorm(embed_dim),
+                "norm2": torch.nn.LayerNorm(embed_dim),
+                "ffn": torch.nn.Sequential(
+                    torch.nn.Linear(embed_dim, embed_dim * 4),
+                    torch.nn.GELU(),
+                    torch.nn.Dropout(dropout),
+                    torch.nn.Linear(embed_dim * 4, embed_dim),
+                    torch.nn.Dropout(dropout),
+                ),
+            }))
+        self.output_ln = torch.nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        queries = self.query_tokens.expand(batch_size, -1, -1)
+        for layer in self.layers:
+            residual = queries
+            queries = layer["norm1"](queries)
+            queries = layer["cross_attn"](
+                query=queries,
+                key=x,
+                value=x,
+            )[0] + residual
+
+            residual = queries
+            queries = layer["norm2"](queries)
+            queries = layer["ffn"](queries) + residual
+
+        output = queries.mean(dim=1)
+        return self.output_ln(output)
+
+
+class SingleViewSigLIPModel(torch.nn.Module):
+    """Siglip V2 single-view model: base SigLIP patch tokens + trained pooler."""
+
+    def __init__(self, base_model, pooler):
+        super().__init__()
+        self.base_model = base_model
+        self.pooler = pooler
+        self.config = base_model.config
+
+    def encode(self, pixel_values):
+        with torch.no_grad():
+            vision_outputs = self.base_model.vision_model(pixel_values=pixel_values)
+            patch_tokens = vision_outputs.last_hidden_state
+        feature = self.pooler(patch_tokens)
+        return feature / feature.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+
+
 class SiglipStateEstimator:
     def __init__(self, device=None):
         if TVF is None or InterpolationMode is None:
@@ -775,26 +842,52 @@ class SiglipStateEstimator:
             raise FileNotFoundError(f"Siglip2 base model path not found: {self.base_model_path}")
 
         print(f"[Siglip] loading Siglip2 base model: {self.base_model_path}")
-        model = AutoModel.from_pretrained(self.base_model_path)
+        base_model = AutoModel.from_pretrained(self.base_model_path)
         self.processor = AutoImageProcessor.from_pretrained(
             self.base_model_path,
             use_fast=False,
         )
-        model_state = {
-            key[len("base_model."):]: value
-            for key, value in state_dict.items()
-            if str(key).startswith("base_model.")
-        }
-        incompatible = model.load_state_dict(model_state, strict=False)
-        missing = list(getattr(incompatible, "missing_keys", []) or [])
-        unexpected = list(getattr(incompatible, "unexpected_keys", []) or [])
-        if missing:
-            print(f"[Siglip] Siglip2 missing keys: {missing[:5]}")
-        if unexpected:
-            print(f"[Siglip] Siglip2 unexpected keys: {unexpected[:5]}")
+
+        has_pooler_state = any(str(key).startswith("pooler.") for key in state_dict)
+        if has_pooler_state:
+            embed_dim = int(base_model.config.vision_config.hidden_size)
+            num_queries = int(state_dict["pooler.query_tokens"].shape[1])
+            num_layers = sum(
+                1 for key in state_dict
+                if str(key).endswith(".cross_attn.in_proj_weight")
+            )
+            pooler = CrossViewAttentionPooler(
+                embed_dim=embed_dim,
+                num_queries=num_queries,
+                num_heads=8,
+                num_layers=num_layers,
+                dropout=0.0,
+            )
+            model = SingleViewSigLIPModel(base_model, pooler)
+            model.load_state_dict(state_dict)
+            self.model_type = "Siglip2-EMA"
+            print(
+                f"[Siglip] Siglip2 EMA model loaded "
+                f"(queries={num_queries}, layers={num_layers})"
+            )
+        else:
+            model_state = {
+                key[len("base_model."):]: value
+                for key, value in state_dict.items()
+                if str(key).startswith("base_model.")
+            }
+            model = base_model
+            incompatible = model.load_state_dict(model_state, strict=False)
+            missing = list(getattr(incompatible, "missing_keys", []) or [])
+            unexpected = list(getattr(incompatible, "unexpected_keys", []) or [])
+            if missing:
+                print(f"[Siglip] Siglip2 missing keys: {missing[:5]}")
+            if unexpected:
+                print(f"[Siglip] Siglip2 unexpected keys: {unexpected[:5]}")
+            self.model_type = "Siglip2"
+
         model = model.to(self.device)
         model.eval()
-        self.model_type = "Siglip2"
         return model
 
     def _load_centers(self, path):
@@ -872,6 +965,11 @@ class SiglipStateEstimator:
             outputs = self.model.get_image_features(pixel_values=pixel_values)
             feature = outputs.pooler_output
             feature = feature / feature.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+            return feature[0].detach().cpu().numpy().astype(np.float32)
+        if self.model_type == "Siglip2-EMA":
+            inputs = self.processor(images=[image], return_tensors="pt")
+            pixel_values = inputs["pixel_values"].to(self.device)
+            feature = self.model.encode(pixel_values)
             return feature[0].detach().cpu().numpy().astype(np.float32)
 
         pixel_values = self._preprocess_image(image).to(self.device)
@@ -1612,7 +1710,7 @@ def set_fresh_tf_callback(callback):
     _fresh_tf_callback = callback
 
 
-def _trigger_fresh_tf_perception(reason="", target=None):
+def _trigger_fresh_tf_perception(reason="", target=None, force=False):
     """Run one perception pass before Marvin queries object TF."""
     global _fresh_tf_last_run
 
@@ -1630,7 +1728,11 @@ def _trigger_fresh_tf_perception(reason="", target=None):
     settle_sec = float(os.getenv("FRESH_TF_SETTLE_SEC", str(fresh_tf_cfg.get("settle_sec", 0.15))))
     now = time.time()
     with _fresh_tf_lock:
-        if min_interval > 0 and (now - _fresh_tf_last_run) < min_interval:
+        if (
+            not force
+            and min_interval > 0
+            and (now - _fresh_tf_last_run) < min_interval
+        ):
             return False
 
         _fresh_tf_last_run = now
@@ -1847,7 +1949,7 @@ def _parse_step_verification(task):
         "source": source,
         "expected": expected,
         "timeout": max(0.1, float(verify.get("timeout", 3.0))),
-        "stable_frames": max(1, int(verify.get("stable_frames", 2))),
+        "stable_frames": max(1, int(verify.get("stable_frames", 5))),
         "on_failure": str(verify.get("on_failure", "home")).strip().lower(),
         "arm": _parse_verify_arm_value(verify.get("arm", "copy last one")),
     }
@@ -2072,8 +2174,8 @@ class TaskSiglipVerifier:
                 f"[TaskSiglip] camera='{camera_arm}' predicted='{actual}', "
                 f"expected='{expected}', sim={float(result.get('best_similarity', 0.0)):.4f}"
             )
-            if len(history) >= stable_frames and len(set(history)) == 1 and history[-1] == expected:
-                return True, actual
+            if len(history) >= stable_frames and len(set(history)) == 1:
+                return history[-1] == expected, actual
             if time.time() >= deadline:
                 break
         return False, latest
@@ -2168,11 +2270,11 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
             "gripper_value": [0.0, 0.0],
             "time": [0.0, 0.1],
         }]
-        for publish_index in range(3):
+        for publish_index in range(2):
             self.publish_kp_separately(home_sequence)
             self.get_logger().info(
                 f"[TaskLoop] arm switch: publish previous arm home "
-                f"{publish_index + 1}/3 arm='{arm_name}'"
+                f"{publish_index + 1}/2 arm='{arm_name}'"
             )
             if publish_index < 2:
                 time.sleep(0.1)
@@ -2203,7 +2305,7 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
 
     def _wait_step_finished(self, step: Step):
         start = time.time()
-        finish_percentage = 0.98
+        finish_percentage = 1.0
         observed_new_cycle = False
         while rclpy.ok() and not _task_loop_stop_event.is_set():
             watcher = self.task_progress_watcher
@@ -2222,7 +2324,7 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
                 observed_new_cycle = True
 
             if observed_new_cycle and watcher.is_finished(
-                silence_after_zero=0.05,
+                silence_after_zero=0.5,
                 finish_percentage=finish_percentage,
             ):
                 self.get_logger().info("[TaskLoop] 当前动作完成")
@@ -2286,6 +2388,7 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
                 )
             latest_actual = actual or latest_actual
             if matched:
+                self.siglip_verification_failed = False
                 self.get_logger().info(
                     f"[TaskSiglip] verification passed: '{actual}', camera='{camera_arm}'"
                 )
@@ -2337,6 +2440,52 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
         )
         return self._select_instance(first_step, frames)
 
+    def _refresh_retry_instance(self, step, current_inst):
+        if self._is_absolute_home_step(step):
+            return step.primary_target()
+        target = current_inst or step.target_names()
+        empty_confirmations = max(
+            1,
+            int(os.getenv("TASK_LOOP_EMPTY_CONFIRMATIONS", "3")),
+        )
+        empty_retry_interval = max(
+            0.0,
+            float(os.getenv("TASK_LOOP_EMPTY_RETRY_INTERVAL_SEC", "0.5")),
+        )
+        for attempt in range(1, empty_confirmations + 1):
+            if _task_loop_stop_event.is_set():
+                return None
+            ok = _trigger_fresh_tf_perception(
+                reason="task_siglip_retry",
+                target=target,
+                force=True,
+            )
+            if ok:
+                refreshed_inst = self.select_target_instance()
+                if refreshed_inst:
+                    self.get_logger().info(
+                        f"[TaskSiglip] retry perception selected='{refreshed_inst}' "
+                        f"(previous='{current_inst}', attempt={attempt}/{empty_confirmations})"
+                    )
+                    return refreshed_inst
+                self.get_logger().warning(
+                    f"[TaskSiglip] retry perception found no target: "
+                    f"{attempt}/{empty_confirmations}; skip stale TF reuse"
+                )
+            else:
+                self.get_logger().warning(
+                    f"[TaskSiglip] retry perception failed: "
+                    f"{attempt}/{empty_confirmations}, target='{target}'"
+                )
+            if attempt < empty_confirmations and empty_retry_interval > 0:
+                time.sleep(empty_retry_interval)
+
+        self.get_logger().warning(
+            f"[TaskSiglip] retry perception confirmed no target after "
+            f"{empty_confirmations} attempts; stop retry"
+        )
+        return None
+
     def run_task_for_instance(self, inst):
         self.active_steps = list(self.task_steps)
         self.active_step_idx = 0
@@ -2345,24 +2494,43 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
             if _task_loop_stop_event.is_set():
                 return TaskStatus.STOP
             self.active_step_idx = idx
-            self._publish_current_action(step, phase="run")
-            self.task_progress_watcher.reset()
-            run_inst = inst
-            if self._is_absolute_home_step(step):
-                run_inst = step.primary_target()
-            self.get_logger().info(
-                f"[TaskLoop] step={idx + 1}/{len(self.active_steps)} "
-                f"target='{step.display_target()}' selected='{run_inst}' action='{step.action_name}'"
-            )
-            status = self._run_step(step, run_inst)
-            if status != TaskStatus.SUCCESS:
+            retry_count = 0
+            while rclpy.ok() and not _task_loop_stop_event.is_set():
+                self._publish_current_action(step, phase="run")
+                self.task_progress_watcher.reset()
+                run_inst = inst
+                if self._is_absolute_home_step(step):
+                    run_inst = step.primary_target()
+                retry_suffix = f", retry={retry_count}" if retry_count else ""
+                self.get_logger().info(
+                    f"[TaskLoop] step={idx + 1}/{len(self.active_steps)} "
+                    f"target='{step.display_target()}' selected='{run_inst}' "
+                    f"action='{step.action_name}'{retry_suffix}"
+                )
+                status = self._run_step(step, run_inst)
+                if status != TaskStatus.SUCCESS:
+                    return status
+                status = self._wait_step_finished(step)
+                if status != TaskStatus.SUCCESS:
+                    return status
+                status = self._verify_step_with_siglip(step)
+                if status == TaskStatus.SUCCESS:
+                    break
+                if getattr(step, "verification", None):
+                    retry_count += 1
+                    self.get_logger().warning(
+                        f"[TaskSiglip] verification failed; retry current step "
+                        f"action='{step.action_name}', selected='{run_inst}', retry={retry_count}"
+                    )
+                    refreshed_inst = self._refresh_retry_instance(step, run_inst)
+                    if not refreshed_inst:
+                        return TaskStatus.FAIL
+                    inst = refreshed_inst
+                    time.sleep(float(os.getenv("TASK_SIGLIP_RETRY_SETTLE_SEC", "0.2")))
+                    continue
                 return status
-            status = self._wait_step_finished(step)
-            if status != TaskStatus.SUCCESS:
-                return status
-            status = self._verify_step_with_siglip(step)
-            if status != TaskStatus.SUCCESS:
-                return status
+            if _task_loop_stop_event.is_set():
+                return TaskStatus.STOP
         return TaskStatus.SUCCESS
 
 
@@ -2956,12 +3124,16 @@ def _load_work_area():
     cfg = _load_auto_app_config()
     area = cfg.get("work_area", {}) if isinstance(cfg, dict) else {}
     try:
-        return {
+        parsed = {
             "x_min": float(area["x_min"]),
             "x_max": float(area["x_max"]),
             "y_min": float(area["y_min"]),
             "y_max": float(area["y_max"]),
         }
+        if "z_min" in area and "z_max" in area:
+            parsed["z_min"] = float(area["z_min"])
+            parsed["z_max"] = float(area["z_max"])
+        return parsed
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -3017,6 +3189,11 @@ def _filter_flowpose_by_work_area(
                 area["x_min"] <= x <= area["x_max"]
                 and area["y_min"] <= y <= area["y_max"]
             )
+            if "z_min" in area and "z_max" in area:
+                in_area = (
+                    in_area
+                    and area["z_min"] <= z <= area["z_max"]
+                )
             reason = "in area" if in_area else "out of area"
             base_poses.append(base_pose.tolist())
 
@@ -3613,6 +3790,10 @@ def create_gradio_interface():
 
     def capture_segment_pose_default(suppress_contained_masks):
         image, _status = capture_segment_pose(DEFAULT_SAM3_PROMPTS, suppress_contained_masks)
+        with state_dict["ui_lock"]:
+            state_dict["latest_task_loop_image"] = image
+            state_dict["latest_task_loop_status"] = str(_status or "")
+            state_dict["latest_task_loop_iteration"] = 0
         return image
 
     def latest_task_loop_image():
@@ -3676,6 +3857,10 @@ def create_gradio_interface():
         empty_confirmations = max(
             1,
             int(os.getenv("TASK_LOOP_EMPTY_CONFIRMATIONS", "3")),
+        )
+        empty_retry_interval = max(
+            0.0,
+            float(os.getenv("TASK_LOOP_EMPTY_RETRY_INTERVAL_SEC", "0.5")),
         )
         consecutive_empty = 0
         task_steps = _load_task_yaml_steps(task_yaml_path)
@@ -3745,6 +3930,8 @@ def create_gradio_interface():
                             "stop loop"
                         )
                         break
+                    if empty_retry_interval > 0:
+                        time.sleep(empty_retry_interval)
                     continue
 
             node = _robotaction_node
@@ -3765,6 +3952,8 @@ def create_gradio_interface():
                         "stop loop"
                     )
                     break
+                if empty_retry_interval > 0:
+                    time.sleep(empty_retry_interval)
                 continue
 
             consecutive_empty = 0

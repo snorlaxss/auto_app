@@ -2128,6 +2128,27 @@ def _env_bool(name, default=False):
     return raw in {"1", "true", "yes", "on", "y"}
 
 
+def _rosbag_record_mode():
+    config = _load_auto_app_config()
+    bag_cfg = config.get("rosbag", {}) if isinstance(config, dict) else {}
+    mode = os.getenv(
+        "TASK_LOOP_ROSBAG_MODE",
+        str(bag_cfg.get("record_mode", "per_target")),
+    )
+    return str(mode or "per_target").strip().lower()
+
+
+def _rosbag_record_complete_loop():
+    return _rosbag_record_mode() in {
+        "complete",
+        "complete_loop",
+        "full",
+        "full_loop",
+        "loop",
+        "whole_loop",
+    }
+
+
 def _bbox_area(bbox):
     if not bbox or len(bbox) < 4:
         return 0.0
@@ -2692,6 +2713,7 @@ def create_gradio_interface():
         "latest_task_loop_iteration": 0,
         "task_loop_ui_status": "TaskLoop动作端未启动",
         "task_loop_waiting_continue": False,
+        "task_loop_finished_recording": False,
         "suppress_contained_masks": _env_bool("SAM3_SUPPRESS_CONTAINED_MASKS", True),
     }
 
@@ -3111,6 +3133,7 @@ def create_gradio_interface():
         }
         prompts_text = _task_prompts_text(task_yaml_path)
         suppress_contained = state_dict["suppress_contained_masks"]
+        complete_loop_recording = _rosbag_record_complete_loop()
         for iteration in range(1, max_iterations + 1):
             if _task_loop_stop_event.is_set():
                 print("[TaskLoop] stop requested")
@@ -3198,10 +3221,23 @@ def create_gradio_interface():
             if result != TaskStatus.SUCCESS:
                 break
 
+            if complete_loop_recording:
+                with state_dict["ui_lock"]:
+                    state_dict["task_loop_ui_status"] = (
+                        f"✅ 当前目标 {inst} 的任务流程已完成\n"
+                        "🎥 complete_loop模式录制中，继续查找下一个目标"
+                    )
+                print(
+                    f"[TaskLoop] selected={inst} task sequence complete; "
+                    "complete_loop recording continues"
+                )
+                continue
+
             bag_path = _rosbag_manager.stop_recording()
             _task_loop_continue_event.clear()
             with state_dict["ui_lock"]:
                 state_dict["task_loop_waiting_continue"] = True
+                state_dict["task_loop_finished_recording"] = False
                 state_dict["task_loop_ui_status"] = (
                     f"✅ 当前目标 {inst} 的任务流程已完成\n"
                     f"💾 rosbag已保存: {bag_path or '<未生成>'}\n"
@@ -3226,7 +3262,7 @@ def create_gradio_interface():
                 )
             print("[TaskLoop] continue received; start next perception iteration")
 
-        _rosbag_manager.stop_recording()
+        final_bag_path = _rosbag_manager.stop_recording()
         if not _task_loop_stop_event.is_set():
             node = _robotaction_node
             if node is not None:
@@ -3239,7 +3275,14 @@ def create_gradio_interface():
         print("[TaskLoop] loop finished")
         with state_dict["ui_lock"]:
             state_dict["task_loop_waiting_continue"] = False
-            state_dict["task_loop_ui_status"] = "✅ TaskLoop已结束"
+            state_dict["task_loop_finished_recording"] = bool(final_bag_path)
+            if complete_loop_recording:
+                state_dict["task_loop_ui_status"] = (
+                    "✅ TaskLoop已结束\n"
+                    f"💾 complete_loop rosbag已保存: {final_bag_path or '<未生成>'}"
+                )
+            else:
+                state_dict["task_loop_ui_status"] = "✅ TaskLoop已结束"
 
     def start_task_loop_actions_default():
         """启动 task.yaml 驱动的循环动作端。"""
@@ -3260,8 +3303,10 @@ def create_gradio_interface():
             _task_loop_continue_event.clear()
             with state_dict["ui_lock"]:
                 state_dict["task_loop_waiting_continue"] = False
+                state_dict["task_loop_finished_recording"] = False
                 state_dict["task_loop_ui_status"] = "▶️ TaskLoop运行中"
             bag_path = _rosbag_manager.start_recording()
+            mode_text = _rosbag_record_mode()
             if _task_loop_thread is None or not _task_loop_thread.is_alive():
                 _task_loop_thread = threading.Thread(
                     target=_task_loop_worker,
@@ -3271,8 +3316,8 @@ def create_gradio_interface():
                 )
                 _task_loop_thread.start()
             return (
-                f"✅ {msg}\n🎥 rosbag录制中: {bag_path}\n{_format_marvin_action_status()}",
-                f"▶️ TaskLoop运行中\n🎥 rosbag录制中: {bag_path}",
+                f"✅ {msg}\n🎥 rosbag录制中: {bag_path}\nrecord_mode={mode_text}\n{_format_marvin_action_status()}",
+                f"▶️ TaskLoop运行中\n🎥 rosbag录制中: {bag_path}\nrecord_mode={mode_text}",
             )
         except Exception as e:
             _rosbag_manager.stop_recording()
@@ -3282,6 +3327,11 @@ def create_gradio_interface():
     def continue_task_loop_actions():
         if _task_loop_thread is None or not _task_loop_thread.is_alive():
             return "⚠️ TaskLoop当前未运行", _format_marvin_action_status()
+        if _rosbag_record_complete_loop():
+            return (
+                "⚠️ 当前为complete_loop录制模式，目标之间会自动继续，无需手动继续",
+                state_dict["task_loop_ui_status"],
+            )
         if _task_loop_stop_event.is_set():
             return "⚠️ TaskLoop正在停止，无法继续", _format_marvin_action_status()
         with state_dict["ui_lock"]:
@@ -3308,16 +3358,17 @@ def create_gradio_interface():
     def play_latest_rosbag():
         with state_dict["ui_lock"]:
             waiting_continue = bool(state_dict.get("task_loop_waiting_continue"))
-        if not waiting_continue:
+            finished_recording = bool(state_dict.get("task_loop_finished_recording"))
+        if not waiting_continue and not finished_recording:
             return (
-                "⚠️ 仅可在每轮任务完成后的暂停状态回放",
+                "⚠️ 仅可在每轮任务完成后的暂停状态或complete_loop结束后回放",
                 state_dict["task_loop_ui_status"],
             )
         try:
             bag_path = _rosbag_manager.play_latest()
             return (
                 f"▶️ 开始回放rosbag: {bag_path}",
-                f"▶️ 正在回放上一轮数据\n{bag_path}",
+                f"▶️ 正在回放rosbag\n{bag_path}",
             )
         except Exception as e:
             return f"❌ rosbag回放失败: {e}", state_dict["task_loop_ui_status"]
@@ -3325,18 +3376,24 @@ def create_gradio_interface():
     def delete_latest_rosbag():
         with state_dict["ui_lock"]:
             waiting_continue = bool(state_dict.get("task_loop_waiting_continue"))
-        if not waiting_continue:
+            finished_recording = bool(state_dict.get("task_loop_finished_recording"))
+        if not waiting_continue and not finished_recording:
             return (
-                "⚠️ 仅可在每轮任务完成后的暂停状态删除",
+                "⚠️ 仅可在每轮任务完成后的暂停状态或complete_loop结束后删除",
                 state_dict["task_loop_ui_status"],
             )
         try:
             bag_path = _rosbag_manager.delete_latest()
-            status = (
-                f"🗑️ 已删除上一轮rosbag\n{bag_path}\n"
-                "⏸️ 仍处于暂停状态，可点击“继续下一轮”"
-            )
+            if waiting_continue:
+                status = (
+                    f"🗑️ 已删除上一轮rosbag\n{bag_path}\n"
+                    "⏸️ 仍处于暂停状态，可点击“继续下一轮”"
+                )
+            else:
+                status = f"🗑️ 已删除complete_loop rosbag\n{bag_path}"
             with state_dict["ui_lock"]:
+                if finished_recording and not waiting_continue:
+                    state_dict["task_loop_finished_recording"] = False
                 state_dict["task_loop_ui_status"] = status
             return f"✅ 已删除rosbag: {bag_path}", status
         except Exception as e:
@@ -3350,6 +3407,7 @@ def create_gradio_interface():
         state_dict["marvin_action_node"] = _robotaction_node
         with state_dict["ui_lock"]:
             state_dict["task_loop_waiting_continue"] = False
+            state_dict["task_loop_finished_recording"] = False
             state_dict["task_loop_ui_status"] = "TaskLoop动作端已停止"
         msg = "✅ TaskLoop动作端已停止" if stopped else "⚠️ TaskLoop动作端未运行"
         return msg, _format_marvin_action_status()

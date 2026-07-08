@@ -234,9 +234,9 @@ class ArmResolver:
         if arm_spec == "correct":
             if translation is None:
                 return self._get_last_arm() or "right"
-            if translation.y > 0.1:
+            if translation.y > 0.13:
                 return "left"
-            if translation.y < -0.1:
+            if translation.y < -0.13:
                 return "right"
             
             rot = quaternion_xyzw_to_matrix(
@@ -248,7 +248,7 @@ class ArmResolver:
             object_x_axis = rot[:, 0]
             signed_angle = float(np.arctan2(object_x_axis[1], object_x_axis[0]))
             angle_epsilon = np.deg2rad(1.0)
-            if -0.1 < translation.y < 0.1:
+            if -0.13 < translation.y < 0.13:
                 if signed_angle < -angle_epsilon:
                     return "left"
                 if signed_angle > angle_epsilon:
