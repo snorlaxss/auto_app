@@ -252,7 +252,7 @@ class FlowPoseServer:
         class_names = req.get("class_names", [])
         instance_names = req.get("instance_names", [])
 
-        pose_out, length_out = self.inferencer.infer(
+        pose_out, length_out, actual_obj_ids = self.inferencer.infer(
             dino_loader=self.dino_loader,
             rgb=rgb,
             depth=depth,
@@ -343,7 +343,7 @@ class FlowPoseServer:
         objects = build_objects(
             pose_all=pose_all,
             length_all=length_all,
-            obj_ids=obj_ids,
+            obj_ids=actual_obj_ids or obj_ids,
             class_names=class_names,
             instance_names=instance_names,
         )

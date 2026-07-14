@@ -449,7 +449,7 @@ class FlowPoseEstimator:
                 "elapsed_sec": 0.0,
             }
 
-        pose_out, length_out = self.inferencer.infer(
+        pose_out, length_out, actual_obj_ids = self.inferencer.infer(
             dino_loader=self.dino_loader,
             rgb=rgb.astype(np.uint8),
             depth=depth.astype(np.float32),
@@ -461,7 +461,7 @@ class FlowPoseEstimator:
         objects = _build_flowpose_objects(
             pose_all,
             length_all,
-            obj_ids_filtered,
+            actual_obj_ids or obj_ids_filtered,
             class_names=class_names,
             instance_names=instance_names,
         )

@@ -102,13 +102,13 @@ class TaskProgressWatcher:
             elif self._seen_active and abs(value) <= 1e-6:
                 self._seen_zero = True
 
-    def reset(self):
+    def reset(self, ignore_sec=0.0):
         with self._lock:
             self._latest_value = None
             self._last_msg_time = None
             self._seen_active = False
             self._seen_zero = False
-            self._reset_time = time.time()
+            self._reset_time = time.time() + max(0.0, float(ignore_sec))
 
     def is_finished(self, silence_after_zero=1, finish_percentage=0.99):
         now = time.time()

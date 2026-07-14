@@ -22,6 +22,7 @@ YOLODocker/model
 
 ros2data
 
-h5
+
+*.hdf5
 
 old

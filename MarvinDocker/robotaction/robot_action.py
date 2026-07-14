@@ -58,7 +58,7 @@ class FusionNode(FusionStateMixin, FusionExecutionMixin, FusionTfMixin, Node):
         self.object_tf_topic = object_tf_topic
 
         self.template_handlers = {
-            k: ActionHandler(v, node=self)
+            k: ActionHandler(v, node=self, template_name=k)
             for k, v in self.object_templates.items()
         }
 

@@ -38,9 +38,6 @@ def _load_action_handler():
     )
 
 
-ActionHandler = _load_action_handler()
-
-
 class TaskStatus:
     UNKNOWN = "unknown"
     SUCCESS = "success"
@@ -157,6 +154,9 @@ def rotation_matrix_to_quaternion_xyzw(rot: np.ndarray):
     if norm > 0:
         q = q / norm
     return q.astype(np.float64)
+
+
+ActionHandler = _load_action_handler()
 
 
 def matrix_to_transform_stamped(

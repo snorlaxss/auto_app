@@ -1,12 +1,13 @@
 sam3:
-  checkpoint_path: Sam3Docker/model/sam3.pt
-  score_threshold: 0.2
+  checkpoint_path: Sam3Docker/model/sam3.1_multiplex.pt
+  score_threshold: 0.45
   dedup_iou_threshold: 0.55
   suppress_contained_masks: true
   containment_threshold: 0.85
   bbox_containment_threshold: 0.85
-  containment_min_area_ratio: 1.2
-  prompts: control, grey screwdriver, yellow screwdriver, saw, knife, pliers, graver, black screwdriver, red screwdriver, test tube, pen 
+  # containment_min_area_ratio: 1.2
+  # prompts: cuboid box,yellow figurine,yellow long tassel, black box
+  prompts: yellow box,white box,blue box
 
 flowpose:
   paths:
@@ -35,8 +36,14 @@ flowpose:
 siglip:   
   model:
     path: SiglipDocker/model/siglip2-so400m-patch14-224
-    checkpoint: SiglipDocker/model/graspanything/model_siglip2_best_eval.pt
-    graph_info_file: SiglipDocker/model/graspanything/graph_info_best_eval.json
+    checkpoint: SiglipDocker/model/graspanything/0630m6weight/model_siglip2_multiview_v2_best_loss.pt
+    graph_info_file: SiglipDocker/model/graspanything/0630m6weight/graph_info_19.json
+    multiview: false
+    num_views: 3
+    num_query_tokens: 8
+    pooler_num_layers: 2
+    pooler_num_heads: 8
+    background_mask_ratio: 0
   inference:
     topk: 5
     image_size: 224
@@ -48,9 +55,10 @@ siglip:
     log_every: 10
 
 marvin:
-  object_yaml_path: MarvinDocker/robotaction/data/tool/tool.yaml
-  status_json_path: MarvinDocker/robotaction/data/tool/graph_info.json
-  status_topic: /siglip/result
+  object_yaml_path: MarvinDocker/robotaction/data/0626/test_box.yaml
+  task_yaml_path: MarvinDocker/robotaction/data/0626/task.yaml 
+  status_json_path: MarvinDocker/robotaction/data/0626/gift_m8_ego_0623.json
+  status_topic: /siglip2/result
   progress_topic: /control/task_percentage
   object_tf_topic: ""
   base_frame: base_link
@@ -64,30 +72,26 @@ realsense:
     front:
       camera_name: camera_head
       camera_namespace: camera_head
-      # serial_no: _347622076256
-      serial_no: _349522070492
+      serial_no: _243222070778
       rgb_camera.color_profile: 640x480x30
       depth_module.depth_profile: 640x480x30
     head:
       camera_name: camera_head
       camera_namespace: camera_head
-      # serial_no: _347622076256
-      serial_no: _349522070492
+      serial_no: _243222070778
       rgb_camera.color_profile: 640x480x30
       depth_module.depth_profile: 640x480x30
     left:
       camera_name: camera_left_wrist
       camera_namespace: camera_left_wrist
-      # serial_no: _427622273358
-      serial_no: _260322279201
+      serial_no: _427622271868
       rgb_camera.color_profile: 640x480x30
       depth_module.color_profile: 640x480x30
       depth_module.depth_profile: 640x480x30
     right:
       camera_name: camera_right_wrist
       camera_namespace: camera_right_wrist
-      # serial_no: _427622271647
-      serial_no: _260322270856
+      serial_no: _412622270871
       rgb_camera.color_profile: 640x480x30
       depth_module.color_profile: 640x480x30
       depth_module.depth_profile: 640x480x30
@@ -97,14 +101,24 @@ fresh_tf:
   settle_sec: 0.15
   perception_camera: front
 work_area:
-  x_max: 0.7
-  x_min: 0.35
-  y_max: 0.25
-  y_min: -0.25
+  x_max: 1.0
+  x_min: 0.25
+  y_max: 0.5
+  y_min: -0.5
   z_min: 0.66
   z_max: 0.75  
 rosbag:
-  save_path: /home/snorlax/work/auto_app/ros2data
+  save_path: /home/yang/auto_app/ros2data
   record_mode: per_target
   # record_mode: complete_loop
   stop_timeout_sec: 10.0
+  critical_topics:
+    - /fusion_pose
+    - /fusion/current_action
+    - /control/task_percentage
+    - /control/target_poseR
+    - /control/target_poseL
+    - /control/speed_scale
+    - /control/eef_constraint
+    - /control/gripperValueR
+    - /control/gripperValueL

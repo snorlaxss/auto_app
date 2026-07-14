@@ -1,0 +1,114 @@
+{
+  "nodes": [
+    {
+      "node_id": "001",
+      "state_description": "The left gripper approaches the box; the toy and bag remain on the table.",
+      "next_action": [
+        { 
+          "target": "cuboid box",
+          "action_name": "pick",
+          "arm": "left",
+          "speed": 0.8,
+          "correction_mode": "forward"
+        },
+        { 
+          "target": "home",
+          "action_name": "location",
+          "arm": "copy last one",
+          "speed": 0.8,
+          "correction_mode": "forward"
+        }     
+      ],
+      "parents": null,
+      "center_feature": null
+    },
+    {
+      "node_id": "002",
+      "state_description": "The left gripper holds the box; the right gripper grasps the tassel to open it.",
+      "next_action": [
+        { 
+          "target": "yellow long tassel",
+          "action_name": "pull",
+          "arm": "right",
+          "speed": 0.8,
+          "correction_mode": "forward",
+          "finish_home": true
+        }
+      ],
+      "center_feature": null
+    },
+    {
+      "node_id": "003",
+      "state_description": "The box is open; the right gripper moves toward the toy.",
+      "next_action": [
+        { 
+          "target": "yellow figurine",
+          "action_name": "pick",
+          "arm": "right",
+          "speed": 0.8,
+          "correction_mode": "forward"
+        }
+      ],
+      "center_feature": null
+    },
+    {
+      "node_id": "004",
+      "state_description": "The right gripper picks and places the toy into the open box.",
+      "next_action": [
+        { 
+          "target": "black box",
+          "action_name": "near",
+          "arm": "right",
+          "speed": 0.8,
+          "correction_mode": "forward"
+        },
+        { 
+          "target": "black box",
+          "action_name": "release",
+          "arm": "right",
+          "speed": 0.8,
+          "correction_mode": "forward",
+          "finish_home": true
+        }
+      ],
+      "center_feature": null
+    },
+    {
+      "node_id": "005",
+      "state_description": "The right gripper closes the box.",
+      "next_action":[
+        { 
+          "target": "black box",
+          "action_name": "push",
+          "arm": "right",
+          "speed": 0.8,
+          "correction_mode": "forward",
+          "finish_home": true
+        }
+      ],
+      "center_feature": null
+    },
+    {
+      "node_id": "006",
+      "state_description": "All steps finish.",
+      "next_action": [
+        { 
+          "target": "home",
+          "action_name": "location_end",
+          "arm": "left",
+          "speed": 0.8,
+          "correction_mode": "forward"
+        },
+        {
+          "target": "home",
+          "action_name": "home",
+          "arm": "both",
+          "speed": 0.8,
+          "correction_mode": "forward"
+        }
+      ],
+      "center_feature": null
+    }
+  
+  ]
+}

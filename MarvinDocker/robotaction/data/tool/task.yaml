@@ -1,17 +1,16 @@
 tasks:
-  - target: "[saw, knife, yellow_screwdriver, grey_screwdriver, pliers, graver, control, black_screwdriver, red_screwdriver, pen]"
+  - target: "[cuboid box, black box, yellow figurine, yellow long tassel]"
     action_name: "pick"
     arm: "correct"
-    speed: 1.0  
+    speed: 1.0
     correction_mode: "reverse"
   - target: "home"
     action_name: "location"
     arm: "copy last one"
-    speed: 1.0  
+    speed: 1.0
     correction_mode: "forward"
   - target: "home"
     action_name: "location1"
     arm: "copy last one"
-    speed: 1.0  
+    speed: 1.0
     correction_mode: "forward"
-

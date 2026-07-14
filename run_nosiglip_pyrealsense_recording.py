@@ -614,7 +614,7 @@ class FlowPoseEstimator:
                 "elapsed_sec": 0.0,
             }
 
-        pose_out, length_out = self.inferencer.infer(
+        pose_out, length_out, actual_obj_ids = self.inferencer.infer(
             dino_loader=self.dino_loader,
             rgb=rgb.astype(np.uint8),
             depth=depth.astype(np.float32),
@@ -626,7 +626,7 @@ class FlowPoseEstimator:
         objects = _build_flowpose_objects(
             pose_all,
             length_all,
-            obj_ids_filtered,
+            actual_obj_ids or obj_ids_filtered,
             class_names=class_names,
             instance_names=instance_names,
         )
@@ -1542,7 +1542,32 @@ def _parse_task_target_value(value):
     return text
 
 
-def _load_task_yaml_steps(task_yaml_path):
+def _is_task_record_marker(task):
+    task = task or {}
+    return bool(
+        isinstance(task, dict)
+        and (task.get("start_record") or task.get("stop_record"))
+    )
+
+
+def _task_dict_to_step(task, index):
+    task = task or {}
+    return Step(
+        action_name=task.get("action_name", f"step_{index}"),
+        target=_parse_task_target_value(task.get("targets", task.get("objects", task.get("target", "")))),
+        arm=task.get("arm"),
+        speed=task.get("speed"),
+        correction_mode=task.get("correction_mode", "org"),
+        finish_home=bool(task.get("finish_home", task.get("finfish_home", False))),
+        fixed_endpoint=task.get("fixed_endpoint", False),
+        approach_count=int(task.get("approach_count", 0) or 0),
+        status_timeout=float(task.get("status_timeout", 2.0)),
+        task_finish_timeout=float(task.get("task_finish_timeout", 60.0)),
+        policy=str(task.get("policy", "first")).strip().lower() or "first",
+    )
+
+
+def _load_task_yaml_groups(task_yaml_path):
     if Step is None:
         raise RuntimeError(f"robotaction import failed: {ROBOTACTION_IMPORT_ERROR}")
     with open(task_yaml_path, "r", encoding="utf-8") as f:
@@ -1551,24 +1576,51 @@ def _load_task_yaml_steps(task_yaml_path):
     if not isinstance(tasks, list) or not tasks:
         raise ValueError(f"Task YAML has no tasks: {task_yaml_path}")
 
-    steps = []
+    groups = []
+    current = []
     for i, task in enumerate(tasks):
-        task = task or {}
-        steps.append(
-            Step(
-                action_name=task.get("action_name", f"step_{i}"),
-                target=_parse_task_target_value(task.get("targets", task.get("objects", task.get("target", "")))),
-                arm=task.get("arm"),
-                speed=task.get("speed"),
-                correction_mode=task.get("correction_mode", "org"),
-                finish_home=bool(task.get("finish_home", task.get("finfish_home", False))),
-                fixed_endpoint=task.get("fixed_endpoint", False),
-                approach_count=int(task.get("approach_count", 0) or 0),
-                status_timeout=float(task.get("status_timeout", 2.0)),
-                task_finish_timeout=float(task.get("task_finish_timeout", 60.0)),
-                policy=str(task.get("policy", "first")).strip().lower() or "first",
-            )
-        )
+        if _is_task_record_marker(task):
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        current.append(_task_dict_to_step(task, i))
+
+    if current:
+        groups.append(current)
+
+    if not groups:
+        raise ValueError(f"Task YAML has no actionable task groups: {task_yaml_path}")
+    return groups
+
+
+def _first_perception_step(steps):
+    for step in steps or []:
+        names = [
+            target
+            for target in step.target_names()
+            if normalize_obj_name(target) != "home"
+        ]
+        if names:
+            return step
+    return None
+
+
+def _perception_target_norms(steps):
+    step = _first_perception_step(steps)
+    if step is None:
+        return set()
+    return {
+        normalize_obj_name(target)
+        for target in step.target_names()
+        if normalize_obj_name(target) != "home"
+    }
+
+
+def _load_task_yaml_steps(task_yaml_path):
+    steps = []
+    for group in _load_task_yaml_groups(task_yaml_path):
+        steps.extend(group)
     return steps
 
 
@@ -1593,7 +1645,9 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
             data = yaml.safe_load(f) or {}
             self.object_templates = data.get("templates", {})
 
-        self.task_steps = _load_task_yaml_steps(task_yaml_path)
+        self.task_groups = _load_task_yaml_groups(task_yaml_path)
+        self.task_group_idx = 0
+        self.task_steps = list(self.task_groups[0])
         self.last_arm = None
         self.base_frame = normalize_frame_id(base_frame)
         self.camera_frames = {
@@ -1633,7 +1687,8 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
 
         self.get_logger().info(
             f"[TaskLoop] object_yaml={object_yaml_path}, task_yaml={task_yaml_path}, "
-            f"progress_topic={progress_topic}, base_frame={self.base_frame}"
+            f"progress_topic={progress_topic}, base_frame={self.base_frame}, "
+            f"task_groups={len(self.task_groups)}"
         )
 
     def _is_home_step(self, step: Step):
@@ -1683,13 +1738,13 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
 
         previous_name = str(previous_arm or "").strip().lower()
         current_name = str(current_arm or "").strip().lower()
-        if (
-            kps is not None
-            and previous_name in {"left", "right"}
-            and current_name in {"left", "right"}
-            and previous_name != current_name
-        ):
-            self._publish_arm_home_three_times(previous_name)
+        # if (
+        #     kps is not None
+        #     and previous_name in {"left", "right"}
+        #     and current_name in {"left", "right"}
+        #     and previous_name != current_name
+        # ):
+        #     self._publish_arm_home_three_times(previous_name)
         return kps
 
     def _wait_step_finished(self, step: Step):
@@ -1735,10 +1790,41 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
             time.sleep(0.2)
         return TaskStatus.STOP
 
+    def advance_task_group(self):
+        self.task_group_idx += 1
+        if self.task_group_idx < len(self.task_groups):
+            self.task_steps = list(self.task_groups[self.task_group_idx])
+            self.get_logger().info(
+                f"[TaskLoop] advance to group {self.task_group_idx + 1}/"
+                f"{len(self.task_groups)}"
+            )
+            return True
+        self.task_steps = []
+        return False
+
+    def rewind_task_group(self):
+        if self.task_group_idx <= 0:
+            return False
+        self.task_group_idx -= 1
+        self.task_steps = list(self.task_groups[self.task_group_idx])
+        self.get_logger().info(
+            f"[TaskLoop] rewind to group {self.task_group_idx + 1}/"
+            f"{len(self.task_groups)}"
+        )
+        return True
+
+    def _select_perception_step(self):
+        return _first_perception_step(self.task_steps)
+
     def select_target_instance(self):
         if not self.task_steps:
             return None
-        first_step = self.task_steps[0]
+        first_step = self._select_perception_step()
+        if first_step is None:
+            self.get_logger().warning(
+                "[TaskLoop] current task group has no perception target"
+            )
+            return None
         if _ros2_node is not None:
             getter = getattr(_ros2_node, "current_object_child_frames", None)
             if callable(getter):
@@ -3125,12 +3211,6 @@ def create_gradio_interface():
             int(os.getenv("TASK_LOOP_EMPTY_CONFIRMATIONS", "3")),
         )
         consecutive_empty = 0
-        task_steps = _load_task_yaml_steps(task_yaml_path)
-        first_step = task_steps[0] if task_steps else None
-        target_norms = {
-            normalize_obj_name(target)
-            for target in (first_step.target_names() if first_step is not None else [])
-        }
         prompts_text = _task_prompts_text(task_yaml_path)
         suppress_contained = state_dict["suppress_contained_masks"]
         complete_loop_recording = _rosbag_record_complete_loop()
@@ -3138,6 +3218,71 @@ def create_gradio_interface():
             if _task_loop_stop_event.is_set():
                 print("[TaskLoop] stop requested")
                 break
+
+            node = _robotaction_node
+            if node is None:
+                print("[TaskLoop] action node stopped")
+                break
+
+            target_norms = _perception_target_norms(node.task_steps)
+
+            if node._select_perception_step() is None:
+                inst = "home"
+                consecutive_empty = 0
+                print(
+                    "[TaskLoop] current task group has only absolute/home steps; "
+                    "skip perception"
+                )
+                result = node.run_task_for_instance(inst)
+                print(f"[TaskLoop] selected={inst}, result={result}")
+                if result != TaskStatus.SUCCESS:
+                    break
+
+                if not node.advance_task_group():
+                    print("[TaskLoop] all task groups completed")
+                    break
+
+                if complete_loop_recording:
+                    with state_dict["ui_lock"]:
+                        state_dict["task_loop_ui_status"] = (
+                            "✅ 当前绝对位置任务流程已完成\n"
+                            "🎥 complete_loop模式录制中，继续执行下一组任务"
+                        )
+                    print(
+                        "[TaskLoop] absolute/home task sequence complete; "
+                        "complete_loop recording continues"
+                    )
+                    continue
+
+                bag_path = _rosbag_manager.stop_recording()
+                _task_loop_continue_event.clear()
+                with state_dict["ui_lock"]:
+                    state_dict["task_loop_waiting_continue"] = True
+                    state_dict["task_loop_finished_recording"] = False
+                    state_dict["task_loop_ui_status"] = (
+                        "✅ 当前绝对位置任务流程已完成\n"
+                        f"💾 rosbag已保存: {bag_path or '<未生成>'}\n"
+                        "⏸️ 已暂停，可回放数据、返回上一轮，或点击“下一步动作”"
+                    )
+                print(
+                    "[TaskLoop] absolute/home task sequence complete; "
+                    "waiting for web continue"
+                )
+                while (
+                    not _task_loop_stop_event.is_set()
+                    and not _task_loop_continue_event.wait(timeout=0.2)
+                ):
+                    pass
+                if _task_loop_stop_event.is_set():
+                    print("[TaskLoop] stop requested while waiting for continue")
+                    break
+                with state_dict["ui_lock"]:
+                    state_dict["task_loop_waiting_continue"] = False
+                    state_dict["task_loop_ui_status"] = (
+                        "▶️ 正在执行当前轮动作"
+                    )
+                print("[TaskLoop] next action received; start current task group")
+                continue
 
             latest_frames = set()
             if _ros2_node is not None:
@@ -3195,11 +3340,6 @@ def create_gradio_interface():
                         break
                     continue
 
-            node = _robotaction_node
-            if node is None:
-                print("[TaskLoop] action node stopped")
-                break
-
             inst = node.select_target_instance()
             if not inst:
                 consecutive_empty += 1
@@ -3219,6 +3359,10 @@ def create_gradio_interface():
             result = node.run_task_for_instance(inst)
             print(f"[TaskLoop] selected={inst}, result={result}")
             if result != TaskStatus.SUCCESS:
+                break
+
+            if not node.advance_task_group():
+                print("[TaskLoop] all task groups completed")
                 break
 
             if complete_loop_recording:
@@ -3241,7 +3385,7 @@ def create_gradio_interface():
                 state_dict["task_loop_ui_status"] = (
                     f"✅ 当前目标 {inst} 的任务流程已完成\n"
                     f"💾 rosbag已保存: {bag_path or '<未生成>'}\n"
-                    "⏸️ 已暂停，可回放数据或点击“继续下一轮”"
+                    "⏸️ 已暂停，可回放数据、返回上一轮，或点击“下一步动作”"
                 )
             print(
                 f"[TaskLoop] selected={inst} task sequence complete; "
@@ -3258,9 +3402,9 @@ def create_gradio_interface():
             with state_dict["ui_lock"]:
                 state_dict["task_loop_waiting_continue"] = False
                 state_dict["task_loop_ui_status"] = (
-                    "▶️ 已继续，正在重新执行SAM3+FlowPose并查找下一个目标"
+                    "▶️ 正在执行当前轮动作，重新运行SAM3+FlowPose"
                 )
-            print("[TaskLoop] continue received; start next perception iteration")
+            print("[TaskLoop] next action received; start current perception iteration")
 
         final_bag_path = _rosbag_manager.stop_recording()
         if not _task_loop_stop_event.is_set():
@@ -3325,8 +3469,8 @@ def create_gradio_interface():
             return f"❌ TaskLoop动作端启动失败: {e}", _format_marvin_action_status()
 
     def continue_task_loop_actions():
-        if _task_loop_thread is None or not _task_loop_thread.is_alive():
-            return "⚠️ TaskLoop当前未运行", _format_marvin_action_status()
+        global _task_loop_thread
+        thread_alive = _task_loop_thread is not None and _task_loop_thread.is_alive()
         if _rosbag_record_complete_loop():
             return (
                 "⚠️ 当前为complete_loop录制模式，目标之间会自动继续，无需手动继续",
@@ -3337,22 +3481,77 @@ def create_gradio_interface():
         with state_dict["ui_lock"]:
             waiting_continue = bool(state_dict.get("task_loop_waiting_continue"))
         if not waiting_continue:
+            if not thread_alive:
+                return "⚠️ TaskLoop当前未运行", _format_marvin_action_status()
             return (
-                "⚠️ 当前任务尚未完成，无需继续",
+                "⚠️ 当前任务尚未完成，无法执行下一步动作",
                 "▶️ TaskLoop正在执行当前目标的任务流程",
             )
         try:
             bag_path = _rosbag_manager.start_recording()
         except Exception as e:
-            return f"❌ 无法开始下一轮rosbag录制: {e}", state_dict["task_loop_ui_status"]
-        _task_loop_continue_event.set()
+            return f"❌ 无法开始当前轮rosbag录制: {e}", state_dict["task_loop_ui_status"]
+        if thread_alive:
+            _task_loop_continue_event.set()
+        else:
+            _task_loop_stop_event.clear()
+            _task_loop_continue_event.clear()
+            _task_loop_thread = threading.Thread(
+                target=_task_loop_worker,
+                args=(DEFAULT_MARVIN_TASK_YAML,),
+                name="task-loop-worker",
+                daemon=True,
+            )
+            _task_loop_thread.start()
         with state_dict["ui_lock"]:
+            state_dict["task_loop_waiting_continue"] = False
             state_dict["task_loop_ui_status"] = (
-                f"▶️ 已发送继续指令\n🎥 rosbag录制中: {bag_path}"
+                f"▶️ 已发送下一步动作指令\n🎥 rosbag录制中: {bag_path}"
             )
         return (
-            f"✅ 已继续下一轮\n🎥 rosbag录制中: {bag_path}",
-            f"▶️ 已发送继续指令\n🎥 rosbag录制中: {bag_path}",
+            f"✅ 已开始执行当前轮动作\n🎥 rosbag录制中: {bag_path}",
+            f"▶️ 已发送下一步动作指令\n🎥 rosbag录制中: {bag_path}",
+        )
+
+    def rewind_task_loop_actions():
+        thread_alive = _task_loop_thread is not None and _task_loop_thread.is_alive()
+        if _rosbag_record_complete_loop():
+            return (
+                "⚠️ 当前为complete_loop录制模式，无法手动返回上一轮",
+                state_dict["task_loop_ui_status"],
+            )
+        if _task_loop_stop_event.is_set():
+            return "⚠️ TaskLoop正在停止，无法返回上一轮", _format_marvin_action_status()
+        with state_dict["ui_lock"]:
+            waiting_continue = bool(state_dict.get("task_loop_waiting_continue"))
+            finished_recording = bool(state_dict.get("task_loop_finished_recording"))
+        if not waiting_continue and not finished_recording:
+            if not thread_alive:
+                return "⚠️ TaskLoop当前未运行", _format_marvin_action_status()
+            return (
+                "⚠️ 只能在每轮任务完成后的暂停状态返回上一轮",
+                "▶️ TaskLoop正在执行当前目标的任务流程",
+            )
+
+        node = _robotaction_node
+        if node is None:
+            return "⚠️ TaskLoop动作端未启动", _format_marvin_action_status()
+        if not node.rewind_task_group():
+            return (
+                "⚠️ 当前已经是第一轮，无法再返回上一轮",
+                state_dict["task_loop_ui_status"],
+            )
+
+        with state_dict["ui_lock"]:
+            state_dict["task_loop_waiting_continue"] = True
+            state_dict["task_loop_finished_recording"] = False
+            state_dict["task_loop_ui_status"] = (
+                f"↩️ 已返回到第 {node.task_group_idx + 1} 轮动作，尚未执行\n"
+                "可继续返回更早动作，或点击“下一步动作”执行当前轮"
+            )
+        return (
+            f"✅ 已返回到第 {node.task_group_idx + 1} 轮动作，等待执行",
+            state_dict["task_loop_ui_status"],
         )
 
     def play_latest_rosbag():
@@ -3387,7 +3586,7 @@ def create_gradio_interface():
             if waiting_continue:
                 status = (
                     f"🗑️ 已删除上一轮rosbag\n{bag_path}\n"
-                    "⏸️ 仍处于暂停状态，可点击“继续下一轮”"
+                    "⏸️ 仍处于暂停状态，可点击“下一步动作”"
                 )
             else:
                 status = f"🗑️ 已删除complete_loop rosbag\n{bag_path}"
@@ -3474,7 +3673,8 @@ def create_gradio_interface():
 
         with gr.Row():
             start_marvin_btn = gr.Button("▶️ 启动TaskLoop动作端", variant="primary", size="lg")
-            continue_task_btn = gr.Button("⏭️ 继续下一轮", variant="secondary", size="lg")
+            rewind_task_btn = gr.Button("↩️ 返回上一轮", variant="secondary", size="lg")
+            continue_task_btn = gr.Button("⏭️ 下一步动作", variant="secondary", size="lg")
             play_rosbag_btn = gr.Button("⏯️ 回放上一轮", variant="secondary", size="lg")
             delete_rosbag_btn = gr.Button("🗑️ 删除上一轮", variant="stop", size="lg")
             home_btn = gr.Button("🏠 Home", variant="secondary", size="lg")
@@ -3500,6 +3700,11 @@ def create_gradio_interface():
         )
         continue_task_btn.click(
             fn=continue_task_loop_actions,
+            inputs=[],
+            outputs=[action_log, current_task_display],
+        )
+        rewind_task_btn.click(
+            fn=rewind_task_loop_actions,
             inputs=[],
             outputs=[action_log, current_task_display],
         )
