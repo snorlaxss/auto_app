@@ -1,10 +1,12 @@
 tasks:
-  - target: "[saw, knife, yellow_screwdriver, grey_screwdriver, pliers, graver, control, black_screwdriver, red_screwdriver, test tube, green plastic, pen, toy,car]"
+  - target: "[saw, knife, yellow_screwdriver, grey_screwdriver, tissue, graver, control, black_screwdriver, red_screwdriver, test tube, green plastic, pen, toy]"
     action_name: "pick"
     arm: "correct"
     speed: 0.8 
     min_action_duration: 2.0
     correction_mode: "reverse"
+    correction_mode_overrides:
+      # toy: "forward"
     verify:
       source: "siglip"
       expected: "Grasping"

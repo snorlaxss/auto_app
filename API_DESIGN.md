@@ -10,6 +10,8 @@
 │  │ 控制指令 (采集/抓取) │───▶│────▶│  POST /api/v1/capture         │  │
 │  │  /停止/复位)      │◀───│──────│  POST /api/v1/grasp           │  │
 │  └─────────────────┘     │      │  POST /api/v1/stop             │  │
+│                           │      │  POST /api/v1/home             │  │
+│                           │      │  POST /api/v1/bringup/*        │  │
 │                           │      │  GET  /api/v1/status           │  │
 │  ┌─────────────────┐     │      └────────────────────────────┘  │
 │  │ 实时数据消费       │◀───│──────┌────────────────────────────┐  │
@@ -206,7 +208,121 @@ POST /api/v1/stop
 
 ---
 
-### 2.4 查询状态
+### 2.4 回 Home
+
+对应网页端 `Home` 按钮，向当前 Marvin 动作端发布双臂 Home；如果动作端未启动，则使用主 ROS2 节点兜底发布。
+
+```
+POST /api/v1/home
+```
+
+**Request:** 无请求体。
+
+**Response `200`:**
+
+```json
+{
+  "code": 0,
+  "message": "Home指令已发送",
+  "data": {
+    "operation_id": "op_20260713_091500_ab12cd",
+    "source": "robotaction_node"
+  }
+}
+```
+
+`source` 取值：
+
+| 值 | 说明 |
+|----|------|
+| `robotaction_node` | 通过 Marvin 动作端发布 Home |
+| `ros2_node` | 动作端未启动，通过主 ROS2 节点兜底发布 Home |
+
+---
+
+### 2.5 机器人 Bringup 控制
+
+这些接口对应网页端 bringup 按钮。后端通过：
+
+```bash
+/home/snorlax/work/distri_0112_org/ros2_ws/start_marvin_tmux.sh
+```
+
+执行 tmux 启动/重启命令。启动接口会设置 `TMUX_ATTACH=0`，不会阻塞 HTTP 请求。
+
+#### 2.5.1 启动机器人 Bringup
+
+```
+POST /api/v1/bringup/start
+```
+
+执行：
+
+```bash
+TMUX_ATTACH=0 bash start_marvin_tmux.sh start
+```
+
+**Response `200`:**
+
+```json
+{
+  "code": 0,
+  "message": "机器人Bringup启动指令已发送",
+  "data": {
+    "action": "bringup_start",
+    "status": "completed",
+    "command": ["bash", "/home/snorlax/work/distri_0112_org/ros2_ws/start_marvin_tmux.sh", "start"],
+    "output": "tmux session 已后台运行: marvin_bringup"
+  }
+}
+```
+
+#### 2.5.2 重发 Control 初始化
+
+```
+POST /api/v1/bringup/restart-control
+```
+
+执行：
+
+```bash
+bash start_marvin_tmux.sh restart control
+```
+
+会重新发送：
+
+```bash
+ros2 service call /control/set_ready std_srvs/srv/Trigger "{}"
+ros2 service call /control/set_mode marvin_msgs/srv/Int "{data: 3}"
+ros2 topic pub -1 /control/gripL std_msgs/msg/Bool "{data: True}"
+ros2 topic pub -1 /control/gripR std_msgs/msg/Bool "{data: True}"
+```
+
+#### 2.5.3 重启 Planner
+
+```
+POST /api/v1/bringup/restart-planner
+```
+
+执行：
+
+```bash
+bash start_marvin_tmux.sh restart planner
+```
+
+**错误响应示例：**
+
+```json
+{
+  "code": 1003,
+  "message": "Marvin tmux命令失败: restart planner\nreturncode=1\n错误: tmux session 不存在: marvin_bringup",
+  "data": null
+}
+```
+
+---
+
+### 2.6 查询状态
 
 ```
 GET /api/v1/status
@@ -371,7 +487,7 @@ ws://<host>:8080/ws/robot/state?token=<jwt_token>
 
 ---
 
-### 2.5 查询操作结果（轮询）
+### 2.7 查询操作结果（轮询）
 
 操作事件只有"开始"和"结束"两条消息，WebSocket 过重。采用 REST 轮询：`POST /grasp` 返回 `operation_id`，前端定时查询 `GET /operation/{id}` 直到状态变为终态。
 
@@ -485,6 +601,10 @@ running ──(POST /stop)──▶ stopping（转圈 + 轮询）
 | `handleCapture` → `setTimeout(1400)` | `POST /api/v1/capture` → 拿到 `image_url` 后显示 | REST |
 | `handleGrasp` → `setTimeout(4000)` 设 `completed` | `POST /api/v1/grasp` → 轮询 `GET /operation/{id}` 直到 `status:"completed"` | REST |
 | `handleStop` → `setTimeout(2000)` 回 `idle` | `POST /api/v1/stop` → 轮询 `GET /operation/{id}` 直到 `status:"aborted"` | REST |
+| `Home` 按钮 | `POST /api/v1/home` | REST |
+| `启动机器人Bringup` 按钮 | `POST /api/v1/bringup/start` | REST |
+| `重发Control初始化` 按钮 | `POST /api/v1/bringup/restart-control` | REST |
+| `重启Planner` 按钮 | `POST /api/v1/bringup/restart-planner` | REST |
 | 转圈动画 (`Loader2`) | 发起操作后开始转圈，轮询到终态后停止 | — |
 | "已完成" 文字 + 绿色勾 | 轮询返回 `status:"completed"` + `result:"success"` 后展示 | — |
 | 静态 `/urdf-robot.png` | WS `/ws/robot/state` 推送 `joints[].angle_rad`，前端驱动 3D 模型 | WebSocket |
@@ -518,6 +638,10 @@ export const api = {
   capture:      (params?: CaptureParams)  => request<CaptureResult>("POST", "/capture", params),
   grasp:        (params?: GraspParams)    => request<GraspResult>("POST", "/grasp", params),
   stop:         (params?: StopParams)     => request<StopResult>("POST", "/stop", params),
+  home:         ()                        => request<HomeResult>("POST", "/home"),
+  bringupStart: ()                        => request<BringupResult>("POST", "/bringup/start"),
+  restartControl: ()                      => request<BringupResult>("POST", "/bringup/restart-control"),
+  restartPlanner: ()                      => request<BringupResult>("POST", "/bringup/restart-planner"),
   getStatus:    ()                        => request<RobotStatus>("GET", "/status"),
   getOperation: (id: string)              => request<OperationResult>("GET", `/operation/${id}`),
 }
@@ -599,6 +723,10 @@ export async function pollUntilDone(
 | 前→后 | `POST /capture` | 触发拍照，直接返回 base64 图片 | 按需 |
 | 前→后 | `POST /grasp` | 启动抓取，返回 operation_id | 按需 |
 | 前→后 | `POST /stop` | 停止/复位，返回 operation_id | 按需 |
+| 前→后 | `POST /home` | 发布双臂 Home | 按需 |
+| 前→后 | `POST /bringup/start` | 启动 Marvin tmux bringup | 按需 |
+| 前→后 | `POST /bringup/restart-control` | 重发 control 初始化 service/topic | 按需 |
+| 前→后 | `POST /bringup/restart-planner` | 重启 planner pane | 按需 |
 | 前→后 | `GET /status` | 查询机器人/相机/安全状态 | 按需 |
 | 前→后 | `GET /operation/{id}` | 轮询操作结果（500ms 间隔） | 每条操作 4-10 次 |
 | 后→前 | `WS /ws/robot/state` | 关节角度、末端位姿（唯一 WS 通道） | 20-100 Hz |

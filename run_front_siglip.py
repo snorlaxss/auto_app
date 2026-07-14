@@ -4,6 +4,7 @@ import contextlib
 import copy
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -212,6 +213,10 @@ class RobotTaskApiService:
         self.worker_thread = None
         self.worker_stop = threading.Event()
         self.joint_monitor = None
+        self.marvin_tmux_script = os.getenv(
+            "MARVIN_TMUX_SCRIPT",
+            "/home/snorlax/work/distri_0112_org/ros2_ws/start_marvin_tmux.sh",
+        )
 
     def startup(self):
         core.init_ros2()
@@ -699,6 +704,90 @@ class RobotTaskApiService:
             )
             return {"operation_id": stop_op["operation_id"], "mode": request.mode}
 
+    def _run_marvin_tmux_command(self, *args, timeout=8.0):
+        script_path = os.path.abspath(self.marvin_tmux_script)
+        if not os.path.isfile(script_path):
+            raise ApiError(1003, f"Marvin启动脚本不存在: {script_path}", 409)
+        workdir = os.path.dirname(script_path)
+        env = os.environ.copy()
+        env.setdefault("TMUX_ATTACH", "0")
+        env.setdefault("ROS_WS", workdir)
+        cmd = ["bash", script_path, *[str(arg) for arg in args if str(arg)]]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=workdir,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or "").strip()
+            return {
+                "command": cmd,
+                "status": "timeout",
+                "output": output,
+                "message": "tmux命令超时，可能已经执行",
+            }
+
+        output = (result.stdout or "").strip()
+        if result.returncode != 0:
+            raise ApiError(
+                1003,
+                f"Marvin tmux命令失败: {' '.join(args)}\nreturncode={result.returncode}\n{output}",
+                409,
+            )
+        return {
+            "command": cmd,
+            "status": "completed",
+            "output": output,
+        }
+
+    def start_bringup(self):
+        result = self._run_marvin_tmux_command("start", timeout=12.0)
+        result["action"] = "bringup_start"
+        return result
+
+    def restart_control(self):
+        result = self._run_marvin_tmux_command("restart", "control", timeout=8.0)
+        result["action"] = "bringup_restart_control"
+        return result
+
+    def restart_planner(self):
+        result = self._run_marvin_tmux_command("restart", "planner", timeout=8.0)
+        result["action"] = "bringup_restart_planner"
+        return result
+
+    def home(self):
+        node = core._robotaction_node
+        try:
+            if node is not None:
+                node.publish_home_both()
+                source = "robotaction_node"
+            elif core._ros2_node is not None:
+                ok = core._ros2_node.publish_home_both()
+                if not ok:
+                    raise RuntimeError("主ROS节点Home发布失败")
+                source = "ros2_node"
+            else:
+                raise RuntimeError("ROS2节点未初始化")
+        except Exception as exc:
+            raise ApiError(1003, f"Home发布失败: {exc}", 409)
+
+        op = self._store_operation(
+            "home",
+            status="completed",
+            result="success",
+            source=source,
+        )
+        return {
+            "operation_id": op["operation_id"],
+            "source": source,
+        }
+
     def get_operation(self, operation_id):
         with self.operation_lock:
             op = self.operations.get(operation_id)
@@ -810,6 +899,34 @@ def create_api_app():
     def stop(request: StopRequest):
         try:
             return _api_envelope(data=service.stop(request), message="停止指令已发送")
+        except Exception as exc:
+            return _api_error_response(exc)
+
+    @api.post("/api/v1/home")
+    def home():
+        try:
+            return _api_envelope(data=service.home(), message="Home指令已发送")
+        except Exception as exc:
+            return _api_error_response(exc)
+
+    @api.post("/api/v1/bringup/start")
+    def bringup_start():
+        try:
+            return _api_envelope(data=service.start_bringup(), message="机器人Bringup启动指令已发送")
+        except Exception as exc:
+            return _api_error_response(exc)
+
+    @api.post("/api/v1/bringup/restart-control")
+    def bringup_restart_control():
+        try:
+            return _api_envelope(data=service.restart_control(), message="Control初始化已重新发送")
+        except Exception as exc:
+            return _api_error_response(exc)
+
+    @api.post("/api/v1/bringup/restart-planner")
+    def bringup_restart_planner():
+        try:
+            return _api_envelope(data=service.restart_planner(), message="Planner重启指令已发送")
         except Exception as exc:
             return _api_error_response(exc)
 

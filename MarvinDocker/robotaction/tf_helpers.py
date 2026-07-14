@@ -90,7 +90,7 @@ class FusionTfMixin:
                             continue
                         try:
                             ts = self.tf_buffer.lookup_transform(
-                                "camera_left_link",
+                                "camera_rgb_link",
                                 child,
                                 rclpy.time.Time(),
                                 timeout=Duration(seconds=0.05),

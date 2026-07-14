@@ -18,6 +18,7 @@ import json
 import ctypes
 import contextlib  # 补齐
 import copy
+import subprocess
 from collections import deque
 from types import SimpleNamespace
 try:
@@ -419,7 +420,7 @@ class FlowPoseEstimator:
             num_points=1024,
             scale_embedding=180,
             ema_rate=0.999,
-            repeat_num=20,
+            repeat_num=25,
             clustering=1,
             clustering_eps=0.01,
             clustering_minpts=0.1667,
@@ -2065,6 +2066,23 @@ def _load_task_yaml_steps(task_yaml_path):
                 )
             ),
         )
+        correction_mode_overrides = task.get("correction_mode_overrides", {}) or {}
+        generic_overrides = task.get("overrides", {}) or {}
+        normalized_correction_overrides = {}
+        if isinstance(correction_mode_overrides, dict):
+            for key, value in correction_mode_overrides.items():
+                name = normalize_obj_name(str(key))
+                if name and value is not None:
+                    normalized_correction_overrides[name] = str(value).strip()
+        if isinstance(generic_overrides, dict):
+            for key, value in generic_overrides.items():
+                if not isinstance(value, dict):
+                    continue
+                mode = value.get("correction_mode")
+                name = normalize_obj_name(str(key))
+                if name and mode is not None:
+                    normalized_correction_overrides[name] = str(mode).strip()
+        step.correction_mode_overrides = normalized_correction_overrides
         step.verification = _parse_step_verification(task)
         steps.append(step)
     return steps
@@ -2307,7 +2325,30 @@ class TaskLoopActionNode(FusionExecutionMixin, FusionTfMixin, Node):
         )
         return True
 
+    def _instance_base_name(self, inst):
+        text = str(inst or "").strip()
+        text = re.sub(r"_\d+$", "", text)
+        return normalize_obj_name(text)
+
+    def _step_with_target_overrides(self, step: Step, inst: str):
+        overrides = getattr(step, "correction_mode_overrides", {}) or {}
+        if not isinstance(overrides, dict) or not overrides:
+            return step
+        inst_name = self._instance_base_name(inst)
+        mode = overrides.get(inst_name)
+        if not mode:
+            return step
+
+        effective_step = copy.copy(step)
+        effective_step.correction_mode = mode
+        self.get_logger().info(
+            f"[TaskLoop] correction_mode override: target='{inst_name}', "
+            f"default='{step.correction_mode}', override='{mode}'"
+        )
+        return effective_step
+
     def _execute_step_once(self, step: Step, inst: str):
+        step = self._step_with_target_overrides(step, inst)
         get_last_arm = getattr(self.arm_resolver, "_get_last_arm", None)
         previous_arm = get_last_arm() if callable(get_last_arm) else self.last_arm
 
@@ -4076,6 +4117,68 @@ def create_gradio_interface():
         except Exception as e:
             return f"❌ Home发布失败: {e}", _format_marvin_action_status()
 
+    MARVIN_TMUX_SCRIPT = os.getenv(
+        "MARVIN_TMUX_SCRIPT",
+        "/home/snorlax/work/distri_0112_org/ros2_ws/start_marvin_tmux.sh",
+    )
+
+    def _run_marvin_tmux_command(*args, timeout=8.0):
+        script_path = os.path.abspath(MARVIN_TMUX_SCRIPT)
+        if not os.path.isfile(script_path):
+            return f"❌ Marvin启动脚本不存在: {script_path}", _format_marvin_action_status()
+        workdir = os.path.dirname(script_path)
+        env = os.environ.copy()
+        env.setdefault("TMUX_ATTACH", "0")
+        env.setdefault("ROS_WS", workdir)
+        cmd = ["bash", script_path, *[str(arg) for arg in args if str(arg)]]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=workdir,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or "").strip()
+            return (
+                f"⚠️ Marvin tmux命令超时，但可能已经执行\n"
+                f"命令: {' '.join(cmd)}\n{output}",
+                _format_marvin_action_status(),
+            )
+        output = (result.stdout or "").strip()
+        if result.returncode == 0:
+            return (
+                f"✅ Marvin tmux命令已执行: {' '.join(args)}\n{output}",
+                _format_marvin_action_status(),
+            )
+        return (
+            f"❌ Marvin tmux命令失败: {' '.join(args)}\n"
+            f"returncode={result.returncode}\n{output}",
+            _format_marvin_action_status(),
+        )
+
+    def start_marvin_bringup():
+        return _run_marvin_tmux_command("start", timeout=12.0)
+
+    def stop_marvin_bringup():
+        return _run_marvin_tmux_command("stop", timeout=8.0)
+
+    def restart_marvin_planner():
+        return _run_marvin_tmux_command("restart", "planner", timeout=8.0)
+
+    def restart_marvin_control():
+        return _run_marvin_tmux_command("restart", "control", timeout=8.0)
+
+    def restart_marvin_gripper():
+        return _run_marvin_tmux_command("restart", "gripper", timeout=8.0)
+
+    def restart_marvin_task_manager():
+        return _run_marvin_tmux_command("restart", "task_manager", timeout=8.0)
+
     try:
         initial_model_status = init_models()
     except Exception as e:
@@ -4123,6 +4226,13 @@ def create_gradio_interface():
                 action_log = gr.Textbox(label="动作日志", interactive=False, lines=8)
 
         with gr.Row():
+            start_bringup_btn = gr.Button("🚀 启动机器人Bringup", variant="primary", size="lg")
+            restart_control_btn = gr.Button("🔁 重发Control初始化", variant="secondary", size="lg")
+
+        with gr.Row():
+            restart_planner_btn = gr.Button("🔁 重启Planner", variant="secondary", size="sm")
+
+        with gr.Row():
             start_marvin_btn = gr.Button("▶️ 启动TaskLoop动作端", variant="primary", size="lg")
             home_btn = gr.Button("🏠 Home", variant="secondary", size="lg")
             stop_btn = gr.Button("🛑 停止Marvin", variant="stop", size="lg")
@@ -4140,6 +4250,9 @@ def create_gradio_interface():
         )
 
         # Marvin action bindings
+        start_bringup_btn.click(fn=start_marvin_bringup, outputs=[action_log, current_task_display])
+        restart_control_btn.click(fn=restart_marvin_control, outputs=[action_log, current_task_display])
+        restart_planner_btn.click(fn=restart_marvin_planner, outputs=[action_log, current_task_display])
         start_marvin_btn.click(
             fn=start_task_loop_actions_default,
             inputs=[],
