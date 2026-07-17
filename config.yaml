@@ -6,7 +6,7 @@ sam3:
   containment_threshold: 0.85
   bbox_containment_threshold: 0.85
   containment_min_area_ratio: 1.2
-  prompts: control, grey screwdriver, yellow screwdriver, saw, knife, tissue, graver, black screwdriver, red screwdriver, test tube, pen, toy
+  prompts: control, grey screwdriver handle, yellow screwdriver handle, saw, knife, tissue, graver, black screwdriver handle, red screwdriver handle, test tube, pen, toy
 
 flowpose:
   paths:
@@ -97,13 +97,15 @@ fresh_tf:
   min_interval_sec: 1.0
   settle_sec: 0.15
   perception_camera: front
+  # TaskLoop第一轮不复用手动捕获缓存，确保重新执行work_area过滤。
+  reuse_manual_first_frame: false
 work_area:
   x_max: 0.7
   x_min: 0.35
   y_max: 0.25
   y_min: -0.25
-  z_min: 0.65
-  z_max: 0.73
+  z_min: 0.6
+  z_max: 0.7
 rosbag:
   save_path: /home/snorlax/work/auto_app/ros2data
   record_mode: per_target

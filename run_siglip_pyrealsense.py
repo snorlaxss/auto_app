@@ -3267,6 +3267,9 @@ def _filter_flowpose_by_work_area(
         if area is None:
             reason = "area disabled"
         elif base_to_camera is None:
+            # Work-area filtering must fail closed. Without the camera->base
+            # transform, the pose cannot be safely compared with x/y/z limits.
+            in_area = False
             reason = "area unknown"
         else:
             base_pose = base_to_camera @ poses[i]
@@ -3957,6 +3960,12 @@ def create_gradio_interface():
         }
         prompts_text = _task_prompts_text(task_yaml_path)
         suppress_contained = state_dict["suppress_contained_masks"]
+        auto_cfg = _load_auto_app_config()
+        fresh_tf_cfg = auto_cfg.get("fresh_tf", {}) if isinstance(auto_cfg, dict) else {}
+        reuse_manual_first_frame = _env_bool(
+            "TASK_LOOP_REUSE_MANUAL_FIRST_FRAME",
+            bool(fresh_tf_cfg.get("reuse_manual_first_frame", False)),
+        )
         for iteration in range(1, max_iterations + 1):
             if _task_loop_stop_event.is_set():
                 print("[TaskLoop] stop requested")
@@ -3972,6 +3981,8 @@ def create_gradio_interface():
                 for frame in latest_frames
             )
             use_manual_first_frame = (
+                reuse_manual_first_frame
+                and
                 iteration == 1
                 and state_dict.get("pose_results") is not None
                 and state_dict.get("labels")

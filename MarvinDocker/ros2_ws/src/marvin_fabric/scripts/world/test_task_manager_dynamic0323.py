@@ -78,9 +78,9 @@ class KeypointMarkerPublisher(Node):
         self.home_active = False
         self.home_future = None
 
-        # home目标点
-        self.HOME_LEFT = np.array([0.276091, 0.26508057, 0.85])
-        self.HOME_RIGHT = np.array([0.276091, -0.26508057, 0.85])
+        # Must match the installed planner_m6 target_left/target_right values.
+        self.HOME_LEFT = np.array([0.44443728, 0.24411250, 0.86353567])
+        self.HOME_RIGHT = np.array([0.44443700, -0.24412298, 0.86354225])
         self.home_start_dist = None
         self.home_arm = None
 
