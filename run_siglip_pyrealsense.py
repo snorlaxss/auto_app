@@ -3746,6 +3746,12 @@ def create_gradio_interface():
         if _ros2_node is not None:
             _ros2_node.clear_object_tf_cache()
 
+        cv2.imshow("RealSense Color", color_image)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q") or key == 27:  # q 或 Esc 退出
+            cv2.destroyAllWindows()
+            return None, f"{init_msg}\n❌ 用户中断"    
+
         state_dict["color_image"] = color_image
         state_dict["depth_image"] = depth_image
         state_dict["depth_scale"] = depth_scale

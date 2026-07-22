@@ -327,6 +327,12 @@ class RobotTaskApiService:
         except Exception as exc:
             raise ApiError(1004, f"相机未连接 / 捕获失败: {exc}", 409)
 
+        # cv2.imshow("RealSense Color", color_image)
+        # key = cv2.waitKey(1) & 0xFF
+        # if key == ord("q") or key == 27:  # q 或 Esc 退出
+        #     cv2.destroyAllWindows()
+        #     return None, f"\n❌ 用户中断"
+
         if core._ros2_node is not None:
             core._ros2_node.clear_object_tf_cache()
 
