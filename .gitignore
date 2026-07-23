@@ -1,4 +1,4 @@
-# Python
+# Python bytecode and tool caches
 __pycache__/
 *.py[cod]
 *.pyo
@@ -7,43 +7,63 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 .coverage
 htmlcov/
 
-# Local editor / assistant state
+# Python environments and local environment files
+.venv/
+venv/
+env/
+.conda/
+.env
+.env.*
+!.env.example
+
+# Editors and local assistant state
 .vscode/
 .idea/
-.github/
 .agents/
 .codex/
-
-# OS / temp files
-.DS_Store
-Thumbs.db
 *.swp
 *.swo
 *~
 
-# Runtime logs / transient service state
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Logs, process state, and temporary files
 *.log
 *.tmp
 *.pid
-FlowPoseDocker/Server/ZeroMQ/latest_response.json
-SiglipDocker/Server/ZeroMQ/latest_response.json
-YOLODocker/Server/ZeroMQ/latest_response.json
-Sam3Docker/Server/ZeroMQ*/latest_response.json
+*.bak
+*.bak.*
+*.orig
+*.rej
 
-# Models, checkpoints, and downloaded third-party model repos
+# Downloaded models, checkpoints, and third-party model repositories
 /checkpoints/
 /ckpts/
-FlowPoseDocker/model/
-Sam3Docker/model/
-SiglipDocker/model/
-YOLODocker/model/
+/FlowPoseDocker/model/
+/Sam3Docker/model/
+/SiglipDocker/model/
 
-# Generated perception / recording data
-ros2data/
-h5/
+# FlowPose generated artifacts
+/FlowPoseDocker/FlowPose/results/
+/FlowPoseDocker/FlowPose/runs/
+/FlowPoseDocker/FlowPose/wandb/
+/FlowPoseDocker/FlowPose/debug/
+
+# Training and inference outputs
+/runs/
+/wandb/
+/outputs/
+
+# Generated perception data and recordings
+/ros2data/
+/ros2bags/
+/h5/
 *.bag
 *.db3
 *.mcap
@@ -55,25 +75,14 @@ h5/
 *.npy
 *.npz
 
-# FlowPose / training outputs
-FlowPoseDocker/FlowPose/results/
-FlowPoseDocker/FlowPose/runs/
-FlowPoseDocker/FlowPose/wandb/
-FlowPoseDocker/FlowPose/debug/
-runs/
-wandb/
-outputs/
+# Native extension build products
+*.o
+build/
+dist/
 
 # ROS2 / colcon build products
-build/
 install/
 log/
-**/build/
-**/install/
-**/log/
 
 # Historical local copies
-old/
-
-# Local generated translator data
-translator_1/data/
+/old/

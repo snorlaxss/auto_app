@@ -1,0 +1,3 @@
+[submodule "FlowPoseDocker/FlowPose"]
+	path = FlowPoseDocker/FlowPose
+	url = https://github.com/KLMmotion/FlowPose.git
